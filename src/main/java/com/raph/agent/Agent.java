@@ -15,6 +15,8 @@ public class Agent {
     private final ToolRegistry toolRegistry;
     private final List<Message> conversationHistory;
     private static final int MAX_ITERATIONS = 10;
+    private int lastInputTokens = 0;
+    private int lastOutputTokens = 0;
 
     public Agent(String apikey) {
         this.client = new DeepSeekClient(apikey);
@@ -28,6 +30,9 @@ public class Agent {
         // 添加用户输入
         conversationHistory.add(Message.user(userInput));
 
+        lastInputTokens = 0;
+        lastOutputTokens = 0;
+
         int iteration = 0;
         while (iteration < MAX_ITERATIONS) {
             iteration++;
@@ -38,6 +43,9 @@ public class Agent {
                     conversationHistory,
                     toolRegistry.getToolDefinitions()
             );
+
+            lastInputTokens += response.inputTokens();
+            lastOutputTokens += response.outputTokens();
 
             // 如果有工具调用
             if (response.hasToolCalls()) {
@@ -91,5 +99,17 @@ public class Agent {
     public void clearHistory() {
         conversationHistory.clear();
         conversationHistory.add(Message.system(SYSTEM_PROMPT));
+    }
+
+    public int getLastInputTokens() {
+        return lastInputTokens;
+    }
+
+    public int getLastOutputTokens() {
+        return lastOutputTokens;
+    }
+
+    public int getLastTotalTokens() {
+        return lastInputTokens + lastOutputTokens;
     }
 }

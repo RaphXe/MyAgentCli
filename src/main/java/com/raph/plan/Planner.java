@@ -1,0 +1,251 @@
+package com.raph.plan;
+
+import com.raph.llm.LlmClient;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.List;
+import java.util.Arrays;
+
+import com.raph.llm.LlmClient.Message;
+
+public class Planner {
+    private final LlmClient client;
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    public Planner(LlmClient client) {
+        this.client = client;
+    }
+
+    private static final String PLANNING_PROMPT = """
+            你是一个任务规划专家。请将用户的复杂任务分解为一系列可执行的子任务。
+            可用任务类型：
+            - FILE_READ：读取文件内容
+            - FILE_WRITE：写入文件内容
+            - COMMAND：执行Shell命令
+            - ANALYSIS：分析结果并做出决策
+            - VERIFICATION：验证结果是否正确
+
+            请按以下json格式输出计划：
+            {
+                "summary": "任务摘要",
+                "tasks": [
+                    {
+                        "id": "task_1",
+                        "description": "任务描述",
+                        "type": "FILE_READ",
+                        "dependencies": []
+                    },
+                    {
+                        "id": "task_2",
+                        "description": "任务描述",
+                        "type": "COMMAND",
+                        "dependencies": ["task_1"]
+                    }
+                ]
+            }
+
+            规则：
+            1. 每个任务必须有唯一的id（如 task_1, task_2）
+            2. dependencies列出依赖的任务id
+            3. 任务应该按执行顺序排列
+            4. 任务描述要具体明确
+            5. 复杂任务拆分为5-10个子任务
+            """;
+
+    private ExecutionPlan parsePlan(String goal, String planJson) throws IOException {
+        String cleaned = planJson.replaceAll("```json\\s*", "")
+                .replaceAll("```\\s*", "")
+                .trim();
+
+        JsonNode root = mapper.readTree(cleaned);
+        String summary = root.path("summary").asText();
+        JsonNode tasksNode = root.path("tasks");
+
+        ExecutionPlan plan = new ExecutionPlan(generatePlanId(), goal);
+        plan.setSummary(summary);
+
+        // 第一遍：创建任务，不处理依赖
+        Map<String, String> idMapping = new HashMap<>();
+        int taskIndex = 1;
+
+        for (JsonNode taskNode : tasksNode) {
+            String originalId = taskNode.path("id").asText();
+            String newId = "task_" + taskIndex++;
+            idMapping.put(originalId, newId);
+
+            String description = taskNode.path("description").asText();
+            String typeStr = taskNode.path("type").asText();
+            Task.TaskType type = parseTaskType(typeStr);
+
+            // 创建任务...
+            Task task = new Task(newId, description, type);
+            plan.addTask(task);
+        }
+
+        // 第二遍：建立依赖和被依赖关系
+        taskIndex = 1;
+        for (JsonNode taskNode : tasksNode) {
+            String newId = "task_" + taskIndex++;
+            Task task = plan.getTask(newId);
+
+            JsonNode depsNode = taskNode.path("dependencies");
+            if (depsNode.isArray()) {
+                for (JsonNode depNode : depsNode) {
+                    String originalDepId = depNode.asText();
+                    String newDepId = idMapping.getOrDefault(originalDepId, originalDepId);
+                    Task dep = plan.getTask(newDepId);
+                    if (dep != null) {
+                        task.addDependency(newDepId);
+                        dep.addDependent(task.getId());
+                    }
+                }
+            }
+        }
+
+        // 计算执行顺序
+        if (!plan.computeExecutionOrder()) {
+            throw new IOException("计划中存在循环依赖");
+        }
+
+        return plan;
+    }
+
+    /**
+     * 生成计划ID
+     */
+    private String generatePlanId() {
+        return "plan_" + System.currentTimeMillis();
+    }
+
+    /**
+     * 解析任务类型
+     */
+    private Task.TaskType parseTaskType(String typeStr) {
+        return switch (typeStr.toUpperCase()) {
+            case "FILE_READ" -> Task.TaskType.FILE_READ;
+            case "FILE_WRITE" -> Task.TaskType.FILE_WRITE;
+            case "COMMAND" -> Task.TaskType.COMMAND;
+            case "ANALYSIS" -> Task.TaskType.ANALYSIS;
+            case "VERIFICATION" -> Task.TaskType.VERIFICATION;
+            default -> Task.TaskType.ANALYSIS;
+        };
+    }
+
+    public ExecutionPlan replan(ExecutionPlan failedPlan, String failureReason) throws IOException {
+        System.out.println("🔄 重新规划，原因: " + failureReason + "\n");
+
+        StringBuilder context = new StringBuilder();
+        context.append("原任务: ").append(failedPlan.getGoal()).append("\n");
+        context.append("失败原因: ").append(failureReason).append("\n");
+        context.append("已完成的任务:\n");
+
+        for (Task task : failedPlan.getAllTasks()) {
+            if (task.getStatus() == Task.TaskStatus.COMPLETED) {
+                context.append("- ").append(task.getId())
+                        .append(": ").append(task.getDescription())
+                        .append("\n");
+            }
+        }
+
+        context.append("\n请制定新的执行计划，避开之前的问题。");
+
+        return createPlan(context.toString());
+    }
+
+    public ExecutionPlan createPlan(String userInput) throws IOException {
+
+        if (isSimpleGoal(userInput)) {
+            System.out.println("✅ 目标简单，直接创建执行计划");
+            return createMinimalPlan(userInput);
+        }
+
+        System.out.println("🧠 规划中...");
+        List<Message> messages = Arrays.asList(
+                Message.system(PLANNING_PROMPT),
+                Message.user("请为以下任务制定执行计划: \n" + userInput));
+
+        LlmClient.ChatResponse response = client.chat(messages, null);
+        String planJson = response.getContent();
+
+        return parsePlan(userInput, planJson);
+    }
+
+    private boolean isSimpleGoal(String goal) {
+        if (goal == null) {
+            return false;
+        }
+
+        String normalized = goal.trim();
+        if (normalized.isEmpty()) {
+            return false;
+        }
+
+        boolean hasMultiStepCue = normalized.contains("然后")
+                || normalized.contains("并且")
+                || normalized.contains("并")
+                || normalized.contains("再")
+                || normalized.contains("最后")
+                || normalized.contains("同时")
+                || normalized.contains("先")
+                || normalized.contains("之后")
+                || normalized.contains("接着")
+                || normalized.contains("以及");
+        if (hasMultiStepCue) {
+            return false;
+        }
+
+        if (normalized.length() > 30) {
+            return false;
+        }
+
+        return normalized.contains("列出")
+                || normalized.contains("查看")
+                || normalized.contains("读取")
+                || normalized.contains("显示")
+                || normalized.contains("执行")
+                || normalized.contains("运行")
+                || normalized.contains("搜索")
+                || normalized.contains("分析")
+                || normalized.contains("当前目录")
+                || normalized.contains("文件");
+    }
+
+    private ExecutionPlan createMinimalPlan(String goal) {
+        ExecutionPlan plan = new ExecutionPlan(generatePlanId(), goal);
+        plan.setSummary(buildMinimalSummary(goal));
+        plan.addTask(new Task("task_1", goal.trim(), inferSimpleTaskType(goal)));
+        if (!plan.computeExecutionOrder()) {
+            throw new IllegalStateException("简单计划不应出现循环依赖");
+        }
+        return plan;
+    }
+
+    private String buildMinimalSummary(String goal) {
+        String normalized = goal == null ? "" : goal.trim();
+        if (normalized.isEmpty()) {
+            return "执行简单任务";
+        }
+        return "直接执行简单任务：" + normalized;
+    }
+
+    private Task.TaskType inferSimpleTaskType(String goal) {
+        String normalized = goal == null ? "" : goal.trim();
+        if (normalized.contains("读取") || normalized.contains("打开") || normalized.contains("查看")
+                && normalized.contains("文件")) {
+            return Task.TaskType.FILE_READ;
+        }
+        if (normalized.contains("写入") || normalized.contains("修改") || normalized.contains("创建文件")) {
+            return Task.TaskType.FILE_WRITE;
+        }
+        if (normalized.contains("分析") || normalized.contains("总结") || normalized.contains("解释")) {
+            return Task.TaskType.ANALYSIS;
+        }
+        if (normalized.contains("验证") || normalized.contains("检查")) {
+            return Task.TaskType.VERIFICATION;
+        }
+        return Task.TaskType.COMMAND;
+    }
+}

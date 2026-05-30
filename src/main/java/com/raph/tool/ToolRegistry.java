@@ -26,6 +26,7 @@ public class ToolRegistry {
     public ToolRegistry() {
         registerFileTools();
         registerShellTools();
+        registerProjectTools();
     }
 
     private void registerFileTools () {
@@ -66,6 +67,32 @@ public class ToolRegistry {
                 }
         ));
 
+        // list_dir 工具
+        tools.put("list_dir", new Tool(
+                "list_dir",
+                "列出目录内容，用于查看项目结构、查找文件等",
+                createParameters(new Param("path", "string", "目录路径", true)),
+                args -> {
+                    String path = args.get("path");
+                    try {
+                        StringBuilder sb = new StringBuilder();
+                        try (var stream = Files.list(Path.of(path))) {
+                            stream.sorted().forEach(entry -> {
+                                String name = entry.getFileName().toString();
+                                if (Files.isDirectory(entry)) {
+                                    sb.append(name).append("/\n");
+                                } else {
+                                    sb.append(name).append("\n");
+                                }
+                            });
+                        }
+                        return "目录内容:\n" + sb;
+                    } catch (Exception e) {
+                        return "列出目录失败: " + e.getMessage();
+                    }
+                }
+        ));
+
     }
 
     private void registerShellTools () {
@@ -95,6 +122,53 @@ public class ToolRegistry {
                                 exitCode, output);
                     } catch (Exception e) {
                         return "执行命令失败: " + e.getMessage();
+                    }
+                }
+        ));
+    }
+
+    /**
+     * 注册项目脚手架工具
+     */
+    private void registerProjectTools() {
+        // create_project 工具
+        tools.put("create_project", new Tool(
+                "create_project",
+                "创建新项目结构，自动生成基础目录和 README 文件",
+                createParameters(
+                        new Param("name", "string", "项目名称", true),
+                        new Param("type", "string", "项目类型 (java/python/general)，默认 general", false)
+                ),
+                args -> {
+                    String name = args.get("name");
+                    String type = args.getOrDefault("type", "general");
+                    try {
+                        Path projectDir = Path.of(name);
+                        Files.createDirectories(projectDir);
+
+                        // 根据项目类型创建不同的目录结构
+                        switch (type.toLowerCase()) {
+                            case "java":
+                                Files.createDirectories(projectDir.resolve("src/main/java"));
+                                Files.createDirectories(projectDir.resolve("src/test/java"));
+                                break;
+                            case "python":
+                                Files.createDirectories(projectDir.resolve("src"));
+                                Files.createDirectories(projectDir.resolve("tests"));
+                                break;
+                            default:
+                                // general 类型：只创建 src 目录
+                                Files.createDirectories(projectDir.resolve("src"));
+                                break;
+                        }
+
+                        // 创建 README.md 骨架文件
+                        String readme = "# " + name + "\n\n项目描述\n";
+                        Files.writeString(projectDir.resolve("README.md"), readme);
+
+                        return "项目已创建: " + name + " (类型: " + type + ")";
+                    } catch (Exception e) {
+                        return "创建项目失败: " + e.getMessage();
                     }
                 }
         ));

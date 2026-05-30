@@ -2,9 +2,13 @@ package com.raph.llm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.io.IOException;
 import java.util.List;
 
 public interface LlmClient {
+
+    ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException;
+
     record ContentPart(String type, String text, String imageBase64, String imageUrl, String mimeType) {
         public static ContentPart text(String text) {
             return new ContentPart("text", text, null, null, null);
@@ -78,6 +82,10 @@ public interface LlmClient {
 
         public boolean hasToolCalls() {
             return toolCalls != null && !toolCalls.isEmpty();
+        }
+
+        public String getContent() {
+            return content;
         }
     }
 }
