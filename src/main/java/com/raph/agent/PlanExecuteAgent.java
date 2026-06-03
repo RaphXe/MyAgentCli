@@ -24,70 +24,104 @@ public class PlanExecuteAgent {
         this.outputTruncateLimit = outputTruncateLimit;
     }
 
+    public ExecutionPlan createPlan(String userInput) throws IOException {
+        return planner.createPlan(userInput);
+    }
+
     public String run(String userInput) {
         try {
-            // ═══════════ Phase 1: 制定计划 ═══════════
             ExecutionPlan plan = planner.createPlan(userInput);
-            plan.markStarted();
-
-            StringBuilder output = new StringBuilder();
-            output.append(formatPlan(plan));
-
-            // ═══════════ Phase 2: 执行计划 ═══════════
-            output.append("\n🚀 开始执行计划...\n");
-            Map<String, String> taskResults = new LinkedHashMap<>();
-            boolean allSuccess = true;
-
-            for (String taskId : plan.getExecutionOrder()) {
-                Task task = plan.getTask(taskId);
-                output.append(String.format("\n⏳ [%s] %s\n", taskId, task.getDescription()));
-
-                try {
-                    task.markStarted();
-                    String result = executeTask(task, taskResults, plan);
-                    task.markCompleted(result);
-                    taskResults.put(taskId, result);
-                    output.append(String.format("   ✅ 完成\n"));
-                } catch (Exception e) {
-                    task.markFailed(e.getMessage());
-                    output.append(String.format("   ❌ 失败: %s\n", e.getMessage()));
-                    allSuccess = false;
-
-                    // 尝试重新规划
-                    ExecutionPlan newPlan = planner.replan(plan, e.getMessage());
-                    output.append(formatPlan(newPlan));
-                    // 递归执行新计划（简化处理：直接替换）
-                    // 实际可更复杂，这里仅提示
-                    output.append("🔄 建议重新运行以获取新的执行计划\n");
-                    break;
-                }
-            }
-
-            if (allSuccess) {
-                plan.markCompleted();
-                output.append("\n📊 所有任务执行完毕\n");
-
-                // 输出最终结果汇总
-                output.append("\n═══════════════════════════════════\n");
-                output.append("📋 执行结果汇总:\n");
-                for (Map.Entry<String, String> entry : taskResults.entrySet()) {
-                    Task task = plan.getTask(entry.getKey());
-                    output.append(String.format("\n── [%s] %s ──\n", entry.getKey(), task.getDescription()));
-                    // 限制输出长度
-                    String result = entry.getValue();
-                    if (result.length() > outputTruncateLimit) {
-                        result = result.substring(0, outputTruncateLimit)
-                                + "\n...（输出已截断，限制: " + outputTruncateLimit + " 字符）";
-                    }
-                    output.append(result).append("\n");
-                }
-                output.append("═══════════════════════════════════\n");
-            }
-
-            return output.toString();
+            return formatPlan(plan) + executePlan(plan).output();
         } catch (Exception e) {
             return "❌ 计划执行失败: " + e.getMessage();
         }
+    }
+
+    public record ExecutionResult(String output, ExecutionPlan pendingPlan) {
+        public boolean hasPendingPlan() {
+            return pendingPlan != null;
+        }
+    }
+
+    public String formatPlan(ExecutionPlan plan) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n📋 执行计划\n");
+        sb.append("═══════════════════════════════════\n");
+        sb.append("目标: ").append(plan.getGoal()).append("\n");
+        sb.append("摘要: ").append(plan.getSummary()).append("\n");
+        sb.append("\n任务列表:\n");
+
+        for (Task task : plan.getAllTasks()) {
+            sb.append(String.format("  [%s] %s - %s",
+                    task.getId(), task.getType(), task.getDescription()));
+            if (!task.getDependencies().isEmpty()) {
+                sb.append("  ← 依赖: ").append(String.join(", ", task.getDependencies()));
+            }
+            sb.append("\n");
+        }
+
+        sb.append("\n执行顺序: ");
+        sb.append(String.join(" → ", plan.getExecutionOrder()));
+        sb.append("\n═══════════════════════════════════\n");
+        return sb.toString();
+    }
+
+    public ExecutionResult executePlan(ExecutionPlan plan) {
+        if (plan.getStatus() != ExecutionPlan.PlanStatus.CREATED) {
+            return new ExecutionResult("⚠ 计划状态不是CREATED，无法执行", null);
+        }
+
+        plan.markStarted();
+        StringBuilder output = new StringBuilder();
+        output.append("\n🚀 开始执行计划...\n");
+        Map<String, String> taskResults = new LinkedHashMap<>();
+        boolean allSuccess = true;
+
+        for (String taskId : plan.getExecutionOrder()) {
+            Task task = plan.getTask(taskId);
+            output.append(String.format("\n⏳ [%s] %s\n", taskId, task.getDescription()));
+
+            try {
+                task.markStarted();
+                String result = executeTask(task, taskResults, plan);
+                task.markCompleted(result);
+                taskResults.put(taskId, result);
+                output.append("   ✅ 完成\n");
+            } catch (Exception e) {
+                task.markFailed(e.getMessage());
+                output.append(String.format("   ❌ 失败: %s\n", e.getMessage()));
+                allSuccess = false;
+
+                try {
+                    ExecutionPlan newPlan = planner.replan(plan, e.getMessage());
+                    output.append(formatPlan(newPlan));
+                    return new ExecutionResult(output.toString(), newPlan);
+                } catch (IOException ex) {
+                    output.append("🔄 重新规划失败: ").append(ex.getMessage()).append("\n");
+                }
+                break;
+            }
+        }
+
+        if (allSuccess) {
+            plan.markCompleted();
+            output.append("\n📊 所有任务执行完毕\n");
+            output.append("\n═══════════════════════════════════\n");
+            output.append("📋 执行结果汇总:\n");
+            for (Map.Entry<String, String> entry : taskResults.entrySet()) {
+                Task task = plan.getTask(entry.getKey());
+                output.append(String.format("\n── [%s] %s ──\n", entry.getKey(), task.getDescription()));
+                String result = entry.getValue();
+                if (result.length() > outputTruncateLimit) {
+                    result = result.substring(0, outputTruncateLimit)
+                            + "\n...（输出已截断，限制: " + outputTruncateLimit + " 字符）";
+                }
+                output.append(result).append("\n");
+            }
+            output.append("═══════════════════════════════════\n");
+        }
+
+        return new ExecutionResult(output.toString(), null);
     }
 
     /**
@@ -178,9 +212,9 @@ public class PlanExecuteAgent {
                     执行完成后，解释命令的输出结果。
                     """;
             case ANALYSIS -> """
-                    你是一个分析专家。请根据前置任务的执行结果进行深入分析。
-                    如果需要额外的信息，可以使用 read_file 或 execute_command 工具。
-                    给出专业、具体的分析结论，列出发现的问题和建议。
+                    你是一个分析专家。请根据任务描述进行分析并返回结果。
+                    如果任务明确需要读取文件或执行命令，才使用对应工具。
+                    如果只是信息问答或分析性任务，直接给出答案，不要召唤工具。
                     请用中文回复。
                     """;
             case VERIFICATION -> """
@@ -200,29 +234,4 @@ public class PlanExecuteAgent {
         return basePrompt + "\n请专注于当前任务，完成任务后返回结果，不要调用不必要的工具。";
     }
 
-    /**
-     * 格式化计划，便于展示
-     */
-    private String formatPlan(ExecutionPlan plan) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("\n📋 执行计划\n");
-        sb.append("═══════════════════════════════════\n");
-        sb.append("目标: ").append(plan.getGoal()).append("\n");
-        sb.append("摘要: ").append(plan.getSummary()).append("\n");
-        sb.append("\n任务列表:\n");
-
-        for (Task task : plan.getAllTasks()) {
-            sb.append(String.format("  [%s] %s - %s",
-                    task.getId(), task.getType(), task.getDescription()));
-            if (!task.getDependencies().isEmpty()) {
-                sb.append("  ← 依赖: ").append(String.join(", ", task.getDependencies()));
-            }
-            sb.append("\n");
-        }
-
-        sb.append("\n执行顺序: ");
-        sb.append(String.join(" → ", plan.getExecutionOrder()));
-        sb.append("\n═══════════════════════════════════\n");
-        return sb.toString();
-    }
 }

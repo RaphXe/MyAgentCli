@@ -1,9 +1,9 @@
 package com.raph.agent;
 
-import com.raph.llm.AbstractOpenaiClient;
 import com.raph.llm.DeepSeekClient;
 import com.raph.llm.LlmClient;
 import com.raph.llm.LlmClient.*;
+import com.raph.memory.MemoryManager;
 import com.raph.tool.ToolRegistry;
 
 import java.io.IOException;
@@ -11,23 +11,34 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class Agent {
-    private final AbstractOpenaiClient client;
+    private final LlmClient client;
     private final ToolRegistry toolRegistry;
     private final List<Message> conversationHistory;
+    private final MemoryManager memoryManager;
     private static final int MAX_ITERATIONS = 10;
     private int lastInputTokens = 0;
     private int lastOutputTokens = 0;
+    private int currentContextTokens = 0;
+    private final int maxContextTokens;
 
     public Agent(String apikey) {
-        this.client = new DeepSeekClient(apikey);
+        this(new DeepSeekClient(apikey), null);
+    }
+
+    public Agent(LlmClient client, MemoryManager memoryManager) {
+        this.client = client;
         this.toolRegistry = new ToolRegistry();
         this.conversationHistory = new ArrayList<>();
+        this.memoryManager = memoryManager;
+        this.maxContextTokens = loadMaxContextTokens();
 
         this.conversationHistory.add(Message.system(SYSTEM_PROMPT));
+        this.currentContextTokens = estimateSystemPromptTokens();
     }
 
     public String run(String userInput) throws IOException {
-        // 添加用户输入
+        rebuildSystemMessage(userInput);
+
         conversationHistory.add(Message.user(userInput));
 
         lastInputTokens = 0;
@@ -37,7 +48,9 @@ public class Agent {
         while (iteration < MAX_ITERATIONS) {
             iteration++;
 
-            // 调用 LLM
+            if (memoryManager != null) {
+                memoryManager.beforeChat(this);
+            }
 
             ChatResponse response = client.chat(
                     conversationHistory,
@@ -46,30 +59,29 @@ public class Agent {
 
             lastInputTokens += response.inputTokens();
             lastOutputTokens += response.outputTokens();
+            currentContextTokens = response.inputTokens();
 
-            // 如果有工具调用
+            if (memoryManager != null) {
+                memoryManager.afterChat(this);
+            }
+
             if (response.hasToolCalls()) {
-                // 记录助手消息
                 conversationHistory.add(
                         Message.assistant(response.content(), response.toolCalls())
                 );
 
-                // 执行每个工具调用
                 for (ToolCall toolCall : response.toolCalls()) {
                     String result = toolRegistry.executeTool(
                             toolCall.function().name(),
                             toolCall.function().arguments()
                     );
 
-                    // 记录工具结果
                     conversationHistory.add(
                             Message.tool(toolCall.id(), result)
                     );
                 }
-                // 继续循环，让 LLM 根据结果继续思考
                 continue;
             } else {
-                // 没有工具调用，任务完成
                 conversationHistory.add(
                         Message.assistant(response.content(), null)
                 );
@@ -78,6 +90,19 @@ public class Agent {
         }
 
         return "达到最大迭代次数限制";
+    }
+
+    private void rebuildSystemMessage(String userInput) {
+        if (memoryManager == null) return;
+
+        String memoryContext = memoryManager.enrichSystemPrompt(userInput);
+        String enriched = memoryContext != null && !memoryContext.isEmpty()
+                ? SYSTEM_PROMPT + memoryContext
+                : SYSTEM_PROMPT;
+
+        if (!conversationHistory.isEmpty() && "system".equals(conversationHistory.get(0).role())) {
+            conversationHistory.set(0, Message.system(enriched));
+        }
     }
 
     private static final String SYSTEM_PROMPT = """
@@ -99,6 +124,13 @@ public class Agent {
     public void clearHistory() {
         conversationHistory.clear();
         conversationHistory.add(Message.system(SYSTEM_PROMPT));
+        currentContextTokens = estimateSystemPromptTokens();
+        lastInputTokens = 0;
+        lastOutputTokens = 0;
+    }
+
+    public List<Message> getConversationHistory() {
+        return conversationHistory;
     }
 
     public int getLastInputTokens() {
@@ -111,5 +143,32 @@ public class Agent {
 
     public int getLastTotalTokens() {
         return lastInputTokens + lastOutputTokens;
+    }
+
+    public int getContextTokens() {
+        return currentContextTokens;
+    }
+
+    public int getMaxContextTokens() {
+        return maxContextTokens;
+    }
+
+    public double getContextUsagePercent() {
+        return maxContextTokens > 0 ? (double) currentContextTokens / maxContextTokens * 100.0 : 0.0;
+    }
+
+    private int estimateSystemPromptTokens() {
+        return (int) Math.ceil(SYSTEM_PROMPT.length() / 3.5);
+    }
+
+    private static int loadMaxContextTokens() {
+        String value = System.getenv("CONTEXT_WINDOW_SIZE");
+        if (value != null && !value.isBlank()) {
+            try {
+                int v = Integer.parseInt(value.trim());
+                if (v > 0) return v;
+            } catch (NumberFormatException ignored) {}
+        }
+        return 1_048_576;
     }
 }

@@ -1,57 +1,81 @@
 package com.raph;
 
 import com.raph.agent.Agent;
+import com.raph.agent.AgentRuntime;
 import com.raph.agent.PlanExecuteAgent;
 import com.raph.llm.DeepSeekClient;
 import com.raph.llm.LlmClient;
+import com.raph.memory.MemoryManager;
+import com.raph.plan.ExecutionPlan;
 import com.raph.tool.ToolRegistry;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.util.Scanner;
+
+import org.jline.reader.LineReader;
+import org.jline.reader.LineReaderBuilder;
+import org.jline.terminal.Terminal;
+import org.jline.terminal.TerminalBuilder;
 
 public class Main {
 
     private static final String PROMPT_NORMAL = "👤 你: ";
     private static final String PROMPT_PLAN = "🧠 计划模式 > ";
+    private static final String PROMPT_CONFIRM = "❓ 是否执行此计划? [y/n]: ";
     private static final int DEFAULT_OUTPUT_TRUNCATE_LIMIT = 2000;
 
     public static void main(String[] args) {
         printBanner();
 
-        // 加载 API Key
         String apiKey = loadApiKey();
         if (apiKey == null || apiKey.isEmpty()) {
             System.err.println("❌ 错误: 未找到 API_KEY");
             System.exit(1);
         }
 
-        // 创建共享组件
         LlmClient llmClient = new DeepSeekClient(apiKey);
         ToolRegistry toolRegistry = new ToolRegistry();
 
-        // 加载输出截断限制
         int truncateLimit = loadOutputTruncateLimit();
 
-        // 创建 Agent 和 PlanExecuteAgent
-        Agent agent = new Agent(apiKey);
+        MemoryManager memoryManager = new MemoryManager(llmClient);
+        memoryManager.init();
+
+        Agent agent = new Agent(llmClient, memoryManager);
         PlanExecuteAgent planAgent = new PlanExecuteAgent(llmClient, toolRegistry, truncateLimit);
 
-        // 交互式循环
-        Scanner scanner = new Scanner(System.in);
-        System.out.println("💡 提示: 输入 '/plan' 进入计划模式, 'clear' 清空历史, 'exit' 退出\n");
+        LineReader reader;
+        try {
+            Terminal terminal = TerminalBuilder.builder()
+                    .system(true)
+                    .encoding(StandardCharsets.UTF_8)
+                    .build();
+            reader = LineReaderBuilder.builder()
+                    .terminal(terminal)
+                    .build();
+        } catch (IOException e) {
+            System.err.println("❌ 终端初始化失败: " + e.getMessage());
+            System.exit(1);
+            return;
+        }
+
+        System.out.println("💡 提示: 输入 '/plan' 进入计划模式, '/team <任务>' 使用自治多 Agent, '/save [描述]' 保存记忆, 'clear' 清空历史, 'exit' 退出\n");
 
         boolean planMode = false;
 
         while (true) {
-            System.out.print(planMode ? PROMPT_PLAN : PROMPT_NORMAL);
-            String input = scanner.nextLine().trim();
+            String prompt = planMode ? PROMPT_PLAN : PROMPT_NORMAL;
+
+            if (!planMode) {
+                System.out.print(contextBar(memoryManager, agent));
+            }
+
+            String input = reader.readLine(prompt).trim();
 
             if (input.isEmpty()) continue;
 
-            // 全局命令: exit
             if (input.equalsIgnoreCase("exit")) {
                 if (planMode) {
                     planMode = false;
@@ -61,7 +85,6 @@ public class Main {
                 break;
             }
 
-            // /plan 命令: 切换计划模式
             if (input.equalsIgnoreCase("/plan")) {
                 planMode = !planMode;
                 if (planMode) {
@@ -73,23 +96,63 @@ public class Main {
                 continue;
             }
 
-            // 普通模式下: clear
+            if (!planMode && input.toLowerCase().startsWith("/team ")) {
+                String teamTask = input.substring(6).trim();
+                if (teamTask.isEmpty()) {
+                    System.out.println("❌ 用法: /team <任务内容>\n");
+                    continue;
+                }
+                System.out.println("👥 启动自治 Multi-Agent 协作...\n");
+                try {
+                    AgentRuntime runtime = new AgentRuntime(llmClient, toolRegistry);
+                    String response = runtime.run(teamTask);
+                    System.out.println(response);
+                } catch (IOException e) {
+                    System.out.println("❌ 多 Agent 执行失败: " + e.getMessage() + "\n");
+                }
+                continue;
+            }
+
             if (!planMode && input.equalsIgnoreCase("clear")) {
                 agent.clearHistory();
                 System.out.println("🗑️ 历史已清空\n");
                 continue;
             }
 
-            // 根据模式路由
+            if (!planMode && input.toLowerCase().startsWith("/save")) {
+                String description = input.substring(5).trim();
+                if (description.isEmpty()) {
+                    System.out.println("❌ 用法: /save <描述内容>\n");
+                    continue;
+                }
+                try {
+                    memoryManager.saveToMemory(description, agent);
+                    System.out.println();
+                } catch (IOException e) {
+                    System.out.println("❌ 保存记忆失败: " + e.getMessage() + "\n");
+                }
+                continue;
+            }
+
             if (planMode) {
-                // 计划模式
                 System.out.print("🤔 规划中...");
                 System.out.flush();
-                String response = planAgent.run(input);
-                System.out.print("\r              \r"); // 清除思考提示
-                System.out.println(response);
+                try {
+                    ExecutionPlan plan = planAgent.createPlan(input);
+                    System.out.print("\r              \r");
+                    System.out.println(planAgent.formatPlan(plan));
+
+                    String confirm = reader.readLine(PROMPT_CONFIRM).trim();
+                    if (confirm.equalsIgnoreCase("y") || confirm.equalsIgnoreCase("yes")) {
+                        runPlanExecutionLoop(planAgent, plan, reader);
+                    } else {
+                        System.out.println("⏭ 已取消执行\n");
+                    }
+                } catch (IOException e) {
+                    System.out.print("\r              \r");
+                    System.out.println("❌ 计划创建失败: " + e.getMessage() + "\n");
+                }
             } else {
-                // 普通 Agent 模式
                 System.out.print("🤔 思考中...");
                 System.out.flush();
                 String response = null;
@@ -98,14 +161,67 @@ public class Main {
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
-                System.out.print("\r              \r"); // 清除思考提示
+                System.out.print("\r              \r");
                 System.out.println("🤖 Agent: " + response);
-                System.out.printf("📊 Token 消耗: 输入 %d + 输出 %d = 总计 %d%n%n",
+                System.out.printf("📊 Token 消耗: 输入 %d + 输出 %d = 总计 %d | 上下文: %s/%s (%.1f%%)%n%n",
                         agent.getLastInputTokens(),
                         agent.getLastOutputTokens(),
-                        agent.getLastTotalTokens());
+                        agent.getLastTotalTokens(),
+                        formatTokens(agent.getContextTokens()),
+                        formatTokens(agent.getMaxContextTokens()),
+                        agent.getContextUsagePercent());
             }
         }
+    }
+
+    private static void runPlanExecutionLoop(PlanExecuteAgent planAgent, ExecutionPlan plan,
+                                              LineReader reader) {
+        System.out.println("\n🚀 用户确认，开始执行计划...\n");
+        PlanExecuteAgent.ExecutionResult result = planAgent.executePlan(plan);
+        System.out.println(result.output());
+
+        while (result.hasPendingPlan()) {
+            String confirm = reader.readLine("🔄 重新规划已完成，是否执行新计划? [y/n]: ").trim();
+            if (confirm.equalsIgnoreCase("y") || confirm.equalsIgnoreCase("yes")) {
+                System.out.println("\n🚀 执行重新规划的计划...\n");
+                result = planAgent.executePlan(result.pendingPlan());
+                System.out.println(result.output());
+            } else {
+                System.out.println("⏭ 已取消执行重新规划的计划\n");
+                break;
+            }
+        }
+    }
+
+    private static String contextBar(MemoryManager memoryManager, Agent agent) {
+        int used = memoryManager.getTokenBudget().total();
+        int max = memoryManager.getTokenBudget().getMaxContextTokens();
+        double pct = memoryManager.getTokenBudget().usagePercent();
+
+        int barWidth = 20;
+        int filled = (int) Math.round(pct / 100.0 * barWidth);
+        if (filled > barWidth) filled = barWidth;
+
+        StringBuilder bar = new StringBuilder("📊 [");
+        for (int i = 0; i < barWidth; i++) {
+            if (i < filled) {
+                bar.append(pct > 80 ? "█" : "▓");
+            } else {
+                bar.append("░");
+            }
+        }
+        bar.append("] ");
+
+        bar.append(formatTokens(used)).append("/").append(formatTokens(max));
+        bar.append(String.format(" %.1f%%", pct));
+        bar.append("\n");
+        return bar.toString();
+    }
+
+    private static String formatTokens(int tokens) {
+        if (tokens >= 1_000_000) return String.format("%.1fM", tokens / 1_000_000.0);
+        if (tokens >= 1_000) return String.format("%.1fK", tokens / 1_000.0);
+        return String.valueOf(tokens);
     }
 
     private static void printBanner() {

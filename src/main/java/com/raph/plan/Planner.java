@@ -47,12 +47,15 @@ public class Planner {
                 ]
             }
 
-            规则：
-            1. 每个任务必须有唯一的id（如 task_1, task_2）
-            2. dependencies列出依赖的任务id
-            3. 任务应该按执行顺序排列
-            4. 任务描述要具体明确
-            5. 复杂任务拆分为5-10个子任务
+            重要原则：
+            1. 对话性问题（你是谁、你能做什么、今天日期等纯信息问答）只需1个ANALYSIS任务，且该任务不需要使用任何工具，直接回答即可
+            2. 只有明确需要文件操作、命令执行的任务才使用FILE_READ/FILE_WRITE/COMMAND/VERIFICATION
+            3. 不要为简单问答添加不必要的FILE_READ或COMMAND任务
+            4. 每个任务必须有唯一的id（如 task_1, task_2）
+            5. dependencies列出依赖的任务id
+            6. 任务应该按执行顺序排列
+            7. 任务描述要具体明确
+            8. 复杂任务拆分为5-10个子任务
             """;
 
     private ExecutionPlan parsePlan(String goal, String planJson) throws IOException {
@@ -157,6 +160,11 @@ public class Planner {
 
     public ExecutionPlan createPlan(String userInput) throws IOException {
 
+        if (isConversationalQuestion(userInput)) {
+            System.out.println("💬 对话性问题，直接回答");
+            return createConversationalPlan(userInput);
+        }
+
         if (isSimpleGoal(userInput)) {
             System.out.println("✅ 目标简单，直接创建执行计划");
             return createMinimalPlan(userInput);
@@ -171,6 +179,41 @@ public class Planner {
         String planJson = response.getContent();
 
         return parsePlan(userInput, planJson);
+    }
+
+    private boolean isConversationalQuestion(String goal) {
+        if (goal == null) return false;
+        String normalized = goal.trim();
+        if (normalized.isEmpty()) return false;
+
+        boolean isQuestion = normalized.contains("?") || normalized.contains("？")
+                || normalized.contains("谁") || normalized.contains("什么")
+                || normalized.contains("怎么") || normalized.contains("为什么")
+                || normalized.contains("如何") || normalized.contains("怎么样")
+                || normalized.contains("哪") || normalized.contains("吗")
+                || normalized.contains("呢") || normalized.contains("能做什么")
+                || normalized.contains("功能");
+
+        if (!isQuestion) return false;
+
+        boolean hasActionCue = normalized.contains("文件")
+                || normalized.contains("目录") || normalized.contains("命令")
+                || normalized.contains("读取") || normalized.contains("写入")
+                || normalized.contains("创建") || normalized.contains("执行")
+                || normalized.contains("运行") || normalized.contains("编译")
+                || normalized.contains("部署");
+
+        return !hasActionCue;
+    }
+
+    private ExecutionPlan createConversationalPlan(String goal) {
+        ExecutionPlan plan = new ExecutionPlan(generatePlanId(), goal);
+        plan.setSummary("直接回答用户的对话性问题");
+        plan.addTask(new Task("task_1", goal.trim(), Task.TaskType.ANALYSIS));
+        if (!plan.computeExecutionOrder()) {
+            throw new IllegalStateException("对话计划不应出现循环依赖");
+        }
+        return plan;
     }
 
     private boolean isSimpleGoal(String goal) {
