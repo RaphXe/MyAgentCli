@@ -9,6 +9,8 @@ public interface LlmClient {
 
     ChatResponse chat(List<Message> messages, List<Tool> tools) throws IOException;
 
+    ChatResponse chat(List<Message> messages, List<Tool> tools, StreamListener listener) throws IOException;
+
     record ContentPart(String type, String text, String imageBase64, String imageUrl, String mimeType) {
         public static ContentPart text(String text) {
             return new ContentPart("text", text, null, null, null);
@@ -66,6 +68,14 @@ public interface LlmClient {
         public static Message tool(String toolCallId, String content) {
             return new Message("tool", content, null, null, toolCallId, null);
         }
+    }
+
+    interface StreamListener {
+        StreamListener NO_OP = new StreamListener() {};
+
+        default void onReasoningDelta(String delta) {}
+
+        default void onContentDelta(String delta) {}
     }
 
     record ChatResponse(String role, String content, String reasoningContent, List<ToolCall> toolCalls,

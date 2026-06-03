@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.raph.llm.LlmClient;
 import com.raph.tool.ToolRegistry;
+import com.raph.render.PlainRenderer;
+import com.raph.render.Renderer;
 
 import java.io.IOException;
 import java.io.PrintStream;
@@ -33,26 +35,34 @@ public class AgentRuntime {
     private final TaskBoard taskBoard = new TaskBoard();
     private final Map<String, TeamAgent> agents = new LinkedHashMap<>();
     private final int maxRounds;
-    private final PrintStream out;
+    private final Renderer renderer;
     private String finalAnswer;
 
     public AgentRuntime(LlmClient client, ToolRegistry toolRegistry) {
-        this(client, toolRegistry, DEFAULT_MAX_ROUNDS, System.out);
+        this(client, toolRegistry, DEFAULT_MAX_ROUNDS, new PlainRenderer(System.out));
     }
 
     public AgentRuntime(LlmClient client, ToolRegistry toolRegistry, PrintStream out) {
-        this(client, toolRegistry, DEFAULT_MAX_ROUNDS, out);
+        this(client, toolRegistry, DEFAULT_MAX_ROUNDS, new PlainRenderer(out));
+    }
+
+    public AgentRuntime(LlmClient client, ToolRegistry toolRegistry, Renderer renderer) {
+        this(client, toolRegistry, DEFAULT_MAX_ROUNDS, renderer);
     }
 
     public AgentRuntime(LlmClient client, ToolRegistry toolRegistry, int maxRounds) {
-        this(client, toolRegistry, maxRounds, System.out);
+        this(client, toolRegistry, maxRounds, new PlainRenderer(System.out));
     }
 
     public AgentRuntime(LlmClient client, ToolRegistry toolRegistry, int maxRounds, PrintStream out) {
+        this(client, toolRegistry, maxRounds, new PlainRenderer(out));
+    }
+
+    public AgentRuntime(LlmClient client, ToolRegistry toolRegistry, int maxRounds, Renderer renderer) {
         this.client = client;
         this.toolRegistry = toolRegistry;
         this.maxRounds = maxRounds <= 0 ? DEFAULT_MAX_ROUNDS : maxRounds;
-        this.out = out == null ? System.out : out;
+        this.renderer = renderer == null ? new PlainRenderer(System.out) : renderer;
         registerDefaultTeam();
     }
 
@@ -136,7 +146,7 @@ public class AgentRuntime {
             return t;
         });
         long start = System.currentTimeMillis();
-        Future<AgentDecision> future = executor.submit(() -> agent.step(view, inbox));
+        Future<AgentDecision> future = executor.submit(() -> agent.step(view, inbox, LlmClient.StreamListener.NO_OP));
         try {
             while (true) {
                 try {
@@ -428,8 +438,7 @@ public class AgentRuntime {
 
     private void logLine(StringBuilder log, String line) {
         log.append(line).append("\n");
-        out.println(line);
-        out.flush();
+        renderer.println(line);
     }
 
     private static String indent(String value, String prefix) {

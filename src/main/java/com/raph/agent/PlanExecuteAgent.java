@@ -5,6 +5,7 @@ import com.raph.plan.ExecutionPlan;
 import com.raph.plan.Planner;
 import com.raph.plan.Task;
 import com.raph.tool.ToolRegistry;
+import com.raph.render.Renderer;
 
 import java.io.IOException;
 import java.util.*;
@@ -67,37 +68,44 @@ public class PlanExecuteAgent {
     }
 
     public ExecutionResult executePlan(ExecutionPlan plan) {
+        return executePlan(plan, (Renderer) null);
+    }
+
+    public ExecutionResult executePlan(ExecutionPlan plan, Renderer renderer) {
         if (plan.getStatus() != ExecutionPlan.PlanStatus.CREATED) {
-            return new ExecutionResult("⚠ 计划状态不是CREATED，无法执行", null);
+            String message = "⚠ 计划状态不是CREATED，无法执行";
+            emit(renderer, message + "\n");
+            return new ExecutionResult(message, null);
         }
 
         plan.markStarted();
         StringBuilder output = new StringBuilder();
-        output.append("\n🚀 开始执行计划...\n");
+        append(output, renderer, "\n🚀 开始执行计划...\n");
         Map<String, String> taskResults = new LinkedHashMap<>();
         boolean allSuccess = true;
 
         for (String taskId : plan.getExecutionOrder()) {
             Task task = plan.getTask(taskId);
-            output.append(String.format("\n⏳ [%s] %s\n", taskId, task.getDescription()));
+            append(output, renderer, String.format("\n⏳ [%s] %s\n", taskId, task.getDescription()));
 
             try {
                 task.markStarted();
-                String result = executeTask(task, taskResults, plan);
+                String result = executeTask(task, taskResults, plan, renderer);
                 task.markCompleted(result);
                 taskResults.put(taskId, result);
-                output.append("   ✅ 完成\n");
+                append(output, renderer, "   ✅ 完成\n");
             } catch (Exception e) {
                 task.markFailed(e.getMessage());
-                output.append(String.format("   ❌ 失败: %s\n", e.getMessage()));
+                append(output, renderer, String.format("   ❌ 失败: %s\n", e.getMessage()));
                 allSuccess = false;
 
                 try {
                     ExecutionPlan newPlan = planner.replan(plan, e.getMessage());
-                    output.append(formatPlan(newPlan));
+                    String formatted = formatPlan(newPlan);
+                    append(output, renderer, formatted);
                     return new ExecutionResult(output.toString(), newPlan);
                 } catch (IOException ex) {
-                    output.append("🔄 重新规划失败: ").append(ex.getMessage()).append("\n");
+                    append(output, renderer, "🔄 重新规划失败: " + ex.getMessage() + "\n");
                 }
                 break;
             }
@@ -105,20 +113,24 @@ public class PlanExecuteAgent {
 
         if (allSuccess) {
             plan.markCompleted();
-            output.append("\n📊 所有任务执行完毕\n");
-            output.append("\n═══════════════════════════════════\n");
-            output.append("📋 执行结果汇总:\n");
+            append(output, renderer, "\n📊 所有任务执行完毕\n");
+            append(output, renderer, "\n═══════════════════════════════════\n");
+            append(output, renderer, "📋 执行结果汇总:\n");
             for (Map.Entry<String, String> entry : taskResults.entrySet()) {
                 Task task = plan.getTask(entry.getKey());
-                output.append(String.format("\n── [%s] %s ──\n", entry.getKey(), task.getDescription()));
+                append(output, renderer, String.format("\n── [%s] %s ──\n", entry.getKey(), task.getDescription()));
                 String result = entry.getValue();
+                if (renderer != null) {
+                    append(output, renderer, "（结果已在任务执行时流式输出，长度: " + result.length() + " 字符）\n");
+                    continue;
+                }
                 if (result.length() > outputTruncateLimit) {
                     result = result.substring(0, outputTruncateLimit)
                             + "\n...（输出已截断，限制: " + outputTruncateLimit + " 字符）";
                 }
-                output.append(result).append("\n");
+                append(output, renderer, result + "\n");
             }
-            output.append("═══════════════════════════════════\n");
+            append(output, renderer, "═══════════════════════════════════\n");
         }
 
         return new ExecutionResult(output.toString(), null);
@@ -129,7 +141,11 @@ public class PlanExecuteAgent {
      */
     private String executeTask(Task task, Map<String, String> previousResults,
                                ExecutionPlan plan) throws IOException {
-        // 构建上下文：前置任务的结果
+        return executeTask(task, previousResults, plan, null);
+    }
+
+    private String executeTask(Task task, Map<String, String> previousResults,
+                               ExecutionPlan plan, Renderer renderer) throws IOException {
         StringBuilder context = new StringBuilder();
         context.append("## 总体目标\n").append(plan.getGoal()).append("\n\n");
         context.append("## 当前任务\n").append(task.getDescription()).append("\n\n");
@@ -146,13 +162,12 @@ public class PlanExecuteAgent {
             }
         }
 
-        // 构建消息列表
         List<LlmClient.Message> messages = new ArrayList<>();
         messages.add(LlmClient.Message.system(buildTaskSystemPrompt(task)));
         messages.add(LlmClient.Message.user(context.toString()));
 
-        // 工具调用循环
         StringBuilder finalResult = new StringBuilder();
+        Renderer.StreamHandle streamHandle = renderer == null ? null : renderer.contentStream("   🤖 ");
         int iteration = 0;
 
         while (iteration < MAX_TOOL_ITERATIONS) {
@@ -160,25 +175,30 @@ public class PlanExecuteAgent {
 
             LlmClient.ChatResponse response = client.chat(
                     messages,
-                    toolRegistry.getToolDefinitions()
+                    toolRegistry.getToolDefinitions(),
+                    streamHandle == null ? LlmClient.StreamListener.NO_OP : streamHandle
             );
 
             if (response.hasToolCalls()) {
-                // 记录助手消息（含工具调用）
+                if (streamHandle != null) {
+                    streamHandle.finish();
+                }
                 messages.add(LlmClient.Message.assistant(
                         response.getContent(), response.toolCalls()));
 
-                // 执行每个工具调用
                 for (LlmClient.ToolCall toolCall : response.toolCalls()) {
+                    emit(renderer, "   🔧 调用工具: " + toolCall.function().name() + "\n");
                     String toolResult = toolRegistry.executeTool(
                             toolCall.function().name(),
                             toolCall.function().arguments()
                     );
                     messages.add(LlmClient.Message.tool(toolCall.id(), toolResult));
+                    emit(renderer, "   ↳ 工具完成\n");
                 }
-                // 继续循环，让 LLM 根据工具结果继续
             } else {
-                // 无工具调用，任务完成
+                if (streamHandle != null) {
+                    streamHandle.finish();
+                }
                 finalResult.append(response.getContent());
                 break;
             }
@@ -232,6 +252,18 @@ public class PlanExecuteAgent {
         };
 
         return basePrompt + "\n请专注于当前任务，完成任务后返回结果，不要调用不必要的工具。";
+    }
+
+    private static void append(StringBuilder output, Renderer renderer, String text) {
+        output.append(text);
+        emit(renderer, text);
+    }
+
+    private static void emit(Renderer renderer, String text) {
+        if (renderer == null || text == null || text.isEmpty()) {
+            return;
+        }
+        renderer.print(text);
     }
 
 }

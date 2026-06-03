@@ -26,8 +26,12 @@ public class Agent {
     }
 
     public Agent(LlmClient client, MemoryManager memoryManager) {
+        this(client, memoryManager, new ToolRegistry());
+    }
+
+    public Agent(LlmClient client, MemoryManager memoryManager, ToolRegistry toolRegistry) {
         this.client = client;
-        this.toolRegistry = new ToolRegistry();
+        this.toolRegistry = toolRegistry == null ? new ToolRegistry() : toolRegistry;
         this.conversationHistory = new ArrayList<>();
         this.memoryManager = memoryManager;
         this.maxContextTokens = loadMaxContextTokens();
@@ -37,6 +41,11 @@ public class Agent {
     }
 
     public String run(String userInput) throws IOException {
+        return run(userInput, LlmClient.StreamListener.NO_OP);
+    }
+
+    public String run(String userInput, LlmClient.StreamListener listener) throws IOException {
+        LlmClient.StreamListener streamListener = listener == null ? LlmClient.StreamListener.NO_OP : listener;
         rebuildSystemMessage(userInput);
 
         conversationHistory.add(Message.user(userInput));
@@ -54,7 +63,8 @@ public class Agent {
 
             ChatResponse response = client.chat(
                     conversationHistory,
-                    toolRegistry.getToolDefinitions()
+                    toolRegistry.getToolDefinitions(),
+                    streamListener
             );
 
             lastInputTokens += response.inputTokens();

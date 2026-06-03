@@ -37,12 +37,22 @@ public class TeamAgent {
     }
 
     public AgentDecision step(AgentRuntime.RuntimeView view, List<AgentMessage> inbox) throws IOException {
+        return step(view, inbox, LlmClient.StreamListener.NO_OP);
+    }
+
+    public AgentDecision step(AgentRuntime.RuntimeView view, List<AgentMessage> inbox,
+                              LlmClient.StreamListener listener) throws IOException {
+        LlmClient.StreamListener streamListener = listener == null ? LlmClient.StreamListener.NO_OP : listener;
         String prompt = buildTurnPrompt(view, inbox);
         history.add(LlmClient.Message.user(prompt));
 
         int iteration = 0;
         while (iteration++ < maxToolIterations()) {
-            LlmClient.ChatResponse response = client.chat(history, canUseTools() ? toolRegistry.getToolDefinitions() : null);
+            LlmClient.ChatResponse response = client.chat(
+                    history,
+                    canUseTools() ? toolRegistry.getToolDefinitions() : null,
+                    streamListener
+            );
             if (response.hasToolCalls()) {
                 history.add(LlmClient.Message.assistant(response.content(), response.toolCalls()));
                 for (LlmClient.ToolCall toolCall : response.toolCalls()) {
