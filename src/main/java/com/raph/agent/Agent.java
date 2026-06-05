@@ -80,14 +80,9 @@ public class Agent {
                         Message.assistant(response.content(), response.toolCalls())
                 );
 
-                for (ToolCall toolCall : response.toolCalls()) {
-                    String result = toolRegistry.executeTool(
-                            toolCall.function().name(),
-                            toolCall.function().arguments()
-                    );
-
+                for (ToolRegistry.ToolExecutionResult result : toolRegistry.executeTools(response.toolCalls())) {
                     conversationHistory.add(
-                            Message.tool(toolCall.id(), result)
+                            Message.tool(result.toolCallId(), result.result())
                     );
                 }
                 continue;
@@ -120,7 +115,7 @@ public class Agent {
 
     你可以使用以下工具来完成任务：
     1. read_file - 读取文件内容
-    2. write_file - 写入文件内容
+    2. write_file - 写入文件内容，mode=overwrite 覆盖写入，mode=append 追加写入
     3. list_dir - 列出目录内容
     4. execute_command - 执行Shell命令
     5. create_project - 创建新项目结构

@@ -30,7 +30,7 @@ public final class ApprovalPolicy {
     public static String getRiskDescription(String toolName) {
         return switch (toolName) {
             case "execute_command" -> "将在系统上执行 Shell 命令，可能修改文件、安装软件或影响系统状态";
-            case "write_file" -> "将写入或覆盖文件内容，原有内容可能丢失";
+            case "write_file" -> "将写入文件内容；覆盖模式可能导致原有内容丢失，追加模式会在文件末尾追加内容";
             case "create_project" -> "将在磁盘上创建新目录和文件";
             default -> isMcpTool(toolName)
                     ? "将调用外部 MCP server 提供的工具，可能访问网络、文件或第三方服务"

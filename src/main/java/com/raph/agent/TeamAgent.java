@@ -55,9 +55,8 @@ public class TeamAgent {
             );
             if (response.hasToolCalls()) {
                 history.add(LlmClient.Message.assistant(response.content(), response.toolCalls()));
-                for (LlmClient.ToolCall toolCall : response.toolCalls()) {
-                    String result = toolRegistry.executeTool(toolCall.function().name(), toolCall.function().arguments());
-                    history.add(LlmClient.Message.tool(toolCall.id(), result));
+                for (ToolRegistry.ToolExecutionResult result : toolRegistry.executeTools(response.toolCalls())) {
+                    history.add(LlmClient.Message.tool(result.toolCallId(), result.result()));
                 }
                 continue;
             }

@@ -188,11 +188,9 @@ public class PlanExecuteAgent {
 
                 for (LlmClient.ToolCall toolCall : response.toolCalls()) {
                     emit(renderer, "   🔧 调用工具: " + toolCall.function().name() + "\n");
-                    String toolResult = toolRegistry.executeTool(
-                            toolCall.function().name(),
-                            toolCall.function().arguments()
-                    );
-                    messages.add(LlmClient.Message.tool(toolCall.id(), toolResult));
+                }
+                for (ToolRegistry.ToolExecutionResult result : toolRegistry.executeTools(response.toolCalls())) {
+                    messages.add(LlmClient.Message.tool(result.toolCallId(), result.result()));
                     emit(renderer, "   ↳ 工具完成\n");
                 }
             } else {
@@ -223,7 +221,7 @@ public class PlanExecuteAgent {
                     """;
             case FILE_WRITE -> """
                     你是一个文件写入助手。你的任务是向文件写入内容。
-                    请使用 write_file 工具完成写入操作。
+                    请使用 write_file 工具完成写入操作。mode=overwrite 表示覆盖写入，mode=append 表示追加写入。
                     写入完成后，简要说明写入的文件路径和内容概要。
                     """;
             case COMMAND -> """

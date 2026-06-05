@@ -15,13 +15,18 @@ public class HitlToolRegistry extends ToolRegistry {
 
     @Override
     public String executeTool(String toolName, String arguments) {
+        return super.executeTool(toolName, arguments);
+    }
+
+    @Override
+    protected String executeTool(String toolName, String arguments, long toolCallingId, boolean batchReservationHeld) {
         if (!hitlHandler.isEnabled() || !ApprovalPolicy.requiresApproval(toolName)) {
-            return super.executeTool(toolName, arguments);
+            return super.executeTool(toolName, arguments, toolCallingId, batchReservationHeld);
         }
 
         String mcpServer = ApprovalPolicy.mcpServerName(toolName);
         if (hitlHandler.isApprovedAllByTool(toolName) || hitlHandler.isApprovedAllByServer(mcpServer)) {
-            return super.executeTool(toolName, arguments);
+            return super.executeTool(toolName, arguments, toolCallingId, batchReservationHeld);
         }
 
         ApprovalRequest request = ApprovalRequest.of(toolName, arguments, null);
@@ -38,8 +43,9 @@ public class HitlToolRegistry extends ToolRegistry {
         if (!result.isApproved()) {
             return "[HITL] 操作未获批准";
         }
-        return super.executeTool(toolName, result.effectiveArguments(arguments));
+        return super.executeTool(toolName, result.effectiveArguments(arguments), toolCallingId, batchReservationHeld);
     }
+
 
     public HitlHandler getHitlHandler() {
         return hitlHandler;
