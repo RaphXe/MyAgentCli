@@ -6,6 +6,7 @@ import com.raph.tool.ToolRegistry;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * 有 inbox、有角色提示词、可基于共享 TaskBoard 自主输出 actions 的团队 Agent。
@@ -42,7 +43,13 @@ public class TeamAgent {
 
     public AgentDecision step(AgentRuntime.RuntimeView view, List<AgentMessage> inbox,
                               LlmClient.StreamListener listener) throws IOException {
+        return step(view, inbox, listener, StepObserver.NO_OP);
+    }
+
+    public AgentDecision step(AgentRuntime.RuntimeView view, List<AgentMessage> inbox,
+                              LlmClient.StreamListener listener, StepObserver observer) throws IOException {
         LlmClient.StreamListener streamListener = listener == null ? LlmClient.StreamListener.NO_OP : listener;
+        StepObserver stepObserver = observer == null ? StepObserver.NO_OP : observer;
         String prompt = buildTurnPrompt(view, inbox);
         history.add(LlmClient.Message.user(prompt));
 
@@ -54,12 +61,14 @@ public class TeamAgent {
                     streamListener
             );
             if (response.hasToolCalls()) {
+                stepObserver.onEvent("tool-iteration#" + iteration + " calls=" + summarizeToolCalls(response.toolCalls()));
                 history.add(LlmClient.Message.assistant(response.content(), response.toolCalls()));
                 for (ToolRegistry.ToolExecutionResult result : toolRegistry.executeTools(response.toolCalls())) {
                     history.add(LlmClient.Message.tool(result.toolCallId(), result.result()));
                 }
                 continue;
             }
+            stepObserver.onEvent("decision-raw=" + shorten(response.content()));
             history.add(LlmClient.Message.assistant(response.content(), null));
             return AgentDecision.parse(response.content());
         }
@@ -76,6 +85,25 @@ public class TeamAgent {
 
     private boolean canUseTools() {
         return role == AgentRole.Researcher || role == AgentRole.Coder;
+    }
+
+    private String summarizeToolCalls(List<LlmClient.ToolCall> toolCalls) {
+        if (toolCalls == null || toolCalls.isEmpty()) return "[]";
+        return toolCalls.stream()
+                .map(call -> call == null || call.function() == null ? "unknown" : call.function().name())
+                .collect(Collectors.joining(", ", "[", "]"));
+    }
+
+    private static String shorten(String value) {
+        if (value == null) return "";
+        String oneLine = value.replace('\n', ' ').replace('\r', ' ').trim();
+        return oneLine.length() > 240 ? oneLine.substring(0, 237) + "..." : oneLine;
+    }
+
+    public interface StepObserver {
+        StepObserver NO_OP = event -> {};
+
+        void onEvent(String event);
     }
 
     private String buildTurnPrompt(AgentRuntime.RuntimeView view, List<AgentMessage> inbox) {
@@ -115,15 +143,20 @@ public class TeamAgent {
                    - complete_task: {"type":"complete_task","task_id":"task_1"}
                    - cancel_task: {"type":"cancel_task","task_id":"task_1","reason":"取消原因"}
                    - block_task: {"type":"block_task","task_id":"task_1","reason":"阻塞原因"}
+                   - spawn_subagent: {"type":"spawn_subagent","role":"Researcher|Coder","title":"子任务标题","prompt":"只读子任务说明","parent_task_id":"task_1","allowed_tools":["project_tree","search_files","read_file"]}
                    - final_answer: {"type":"final_answer","content":"最终答复"}
                 3. 不要重复认领已有 owner 的任务。依赖未完成时，不要开始任务。
                 4. 不要向正在 IN_PROGRESS/CLAIMED 的任务 owner 反复询问“进展如何”；运行时会显示心跳。若确实阻塞，请改为 cancel_task、重新委派或等待审查结果。
                 5. 你可以通过消息请求其他 Agent 协助、质疑方案或要求审查。
-                6. 若你是 Coordinator，优先创建少量必要任务、取消重复/过期任务，并尽早判断是否可以最终收尾。
+                6. 若你是 Coordinator，优先创建少量必要任务、取消重复/过期任务，并尽早判断是否可以最终收尾。Coordinator 不要使用 spawn_subagent。
                 7. 当前运行目录就是用户项目根目录；分析“当前项目”时，直接创建探索任务并使用 list_dir/read_file，不要反复向 user 索要路径或授权。
                 8. 若你是 Coder/Researcher，看到适合自己的 TODO/REJECTED 任务时可以主动 claim/start，并在必要时调用工具。
-                9. 若你是 Tester，默认只做独立审查和一致性检查，不主动扫描全项目，除非 coordinator 明确要求。
-                10. 若你是 Reviewer，看到 READY_FOR_REVIEW 任务时主动审查并 approve/reject；APPROVED 即视为可交付，不必要求 owner 再 complete_task。
+                9. 若你是 Coder/Researcher，且当前任务可以拆成多个互不依赖的只读探索问题，可以一次创建 1-3 个 spawn_subagent 辅助。子Agent结果会以 ANSWER 消息回到你的 inbox；你需要自己汇总，不要让子Agent直接收尾。
+                10. spawn_subagent 第一阶段只能用于只读探索、代码阅读、方案比较或验证。不要要求子Agent写文件、创建任务、最终答复、审批任务或修改 Git 状态。
+                11. 若你是 Researcher，遇到“项目结构/组织架构/优化方向/关键文件/技术栈”这类项目级探索任务，优先输出 claim_task、start_task 和 2-3 个 spawn_subagent；不要先自己连续调用工具。等待子Agent ANSWER 后再汇总。
+                12. 若你是 Coder，只有任务明确要求实现、修改代码或验证代码时才认领；不要认领明显偏探索/调研的任务。
+                13. 若你是 Tester，默认只做独立审查和一致性检查，不主动扫描全项目，除非 coordinator 明确要求。
+                14. 若你是 Reviewer，看到 READY_FOR_REVIEW 任务时主动审查并 approve/reject；APPROVED 即视为可交付，不必要求 owner 再 complete_task。
                 """;
     }
 }

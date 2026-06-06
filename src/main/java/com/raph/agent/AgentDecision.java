@@ -27,6 +27,10 @@ public record AgentDecision(String status, List<Action> actions, String finalAns
             String artifact,
             String note,
             String reason,
+            String role,
+            String prompt,
+            String parentTaskId,
+            List<String> allowedTools,
             Map<String, String> params
     ) {}
 
@@ -38,7 +42,8 @@ public record AgentDecision(String status, List<Action> actions, String finalAns
         if (content == null || content.isBlank()) return empty();
         return new AgentDecision("reported", List.of(new Action(
                 "send_message", AgentMessage.BROADCAST, "REPORT_PROGRESS", content,
-                null, null, null, List.of(), null, null, null, Map.of()
+                null, null, null, List.of(), null, null, null,
+                null, null, null, List.of(), Map.of()
         )), null);
     }
 
@@ -65,6 +70,10 @@ public record AgentDecision(String status, List<Action> actions, String finalAns
                             text(node, "artifact", null),
                             text(node, "note", null),
                             text(node, "reason", null),
+                            text(node, "role", null),
+                            text(node, "prompt", null),
+                            text(node, "parent_task_id", null),
+                            stringList(node.path("allowed_tools")),
                             params(node)
                     ));
                 }
@@ -83,7 +92,8 @@ public record AgentDecision(String status, List<Action> actions, String finalAns
             Map.Entry<String, JsonNode> entry = fields.next();
             String key = entry.getKey();
             if (List.of("type", "to", "message_type", "content", "task_id", "title", "description",
-                    "dependencies", "artifact", "note", "reason").contains(key)) {
+                    "dependencies", "artifact", "note", "reason", "role", "prompt",
+                    "parent_task_id", "allowed_tools").contains(key)) {
                 continue;
             }
             JsonNode value = entry.getValue();

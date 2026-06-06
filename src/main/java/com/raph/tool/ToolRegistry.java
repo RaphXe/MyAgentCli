@@ -14,10 +14,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,6 +43,7 @@ public class ToolRegistry {
 
     public ToolRegistry() {
         registerFileTools();
+        registerNavigationTools();
         registerShellTools();
         registerProjectTools();
     }
@@ -117,6 +121,114 @@ public class ToolRegistry {
                 }
         ));
 
+    }
+
+    private void registerNavigationTools() {
+        tools.put("project_tree", new Tool(
+                "project_tree",
+                "生成项目目录树，用于快速了解项目结构；可设置 path、max_depth、include_files",
+                createParameters(
+                        new Param("path", "string", "起始目录，默认当前目录", false),
+                        new Param("max_depth", "string", "最大深度，默认3，最大6", false),
+                        new Param("include_files", "string", "是否包含文件，true/false，默认true", false)
+                ),
+                ToolMetadata.readOnly(),
+                args -> {
+                    Path root = Path.of(args.getOrDefault("path", ".")).toAbsolutePath().normalize();
+                    int maxDepth = clamp(parseInt(args.get("max_depth"), 3), 1, 6);
+                    boolean includeFiles = parseBoolean(args.get("include_files"), true);
+                    int maxEntries = 300;
+                    try {
+                        if (!Files.exists(root)) {
+                            return "目录不存在: " + root;
+                        }
+                        List<Path> entries;
+                        try (var stream = Files.walk(root, maxDepth)) {
+                            entries = stream
+                                    .filter(path -> !path.equals(root))
+                                    .filter(path -> !isIgnoredPath(root, path))
+                                    .filter(path -> includeFiles || Files.isDirectory(path))
+                                    .sorted(Comparator.comparing(path -> root.relativize(path).toString()))
+                                    .limit(maxEntries + 1L)
+                                    .toList();
+                        }
+                        StringBuilder sb = new StringBuilder();
+                        sb.append("项目树: ").append(root).append(" (max_depth=").append(maxDepth).append(")\n");
+                        int count = 0;
+                        for (Path entry : entries) {
+                            if (count >= maxEntries) {
+                                sb.append("...（已截断，最多 ").append(maxEntries).append(" 项）\n");
+                                break;
+                            }
+                            Path relative = root.relativize(entry);
+                            int depth = relative.getNameCount();
+                            sb.append("  ".repeat(Math.max(0, depth - 1)))
+                                    .append(Files.isDirectory(entry) ? "📁 " : "📄 ")
+                                    .append(relative.getFileName())
+                                    .append(Files.isDirectory(entry) ? "/" : "")
+                                    .append("\n");
+                            count++;
+                        }
+                        if (count == 0) {
+                            sb.append("(空目录或无匹配项)\n");
+                        }
+                        return sb.toString();
+                    } catch (Exception e) {
+                        return "生成项目树失败: " + e.getMessage();
+                    }
+                }
+        ));
+
+        tools.put("search_files", new Tool(
+                "search_files",
+                "按文件名或相对路径关键词搜索文件，用于快速定位入口文件、配置和文档",
+                createParameters(
+                        new Param("path", "string", "搜索目录，默认当前目录", false),
+                        new Param("query", "string", "文件名或路径关键词，例如 pom、AgentRuntime、README", true),
+                        new Param("max_results", "string", "最大结果数，默认50，最大100", false)
+                ),
+                ToolMetadata.readOnly(),
+                args -> {
+                    Path root = Path.of(args.getOrDefault("path", ".")).toAbsolutePath().normalize();
+                    String query = args.getOrDefault("query", "").trim().toLowerCase();
+                    int maxResults = clamp(parseInt(args.get("max_results"), 50), 1, 100);
+                    if (query.isEmpty()) {
+                        return "搜索失败: query 不能为空";
+                    }
+                    try {
+                        if (!Files.exists(root)) {
+                            return "目录不存在: " + root;
+                        }
+                        List<Path> matches;
+                        try (var stream = Files.walk(root, 8)) {
+                            matches = stream
+                                    .filter(Files::isRegularFile)
+                                    .filter(path -> !isIgnoredPath(root, path))
+                                    .filter(path -> root.relativize(path).toString().toLowerCase().contains(query))
+                                    .sorted(Comparator.comparing(path -> root.relativize(path).toString()))
+                                    .limit(maxResults + 1L)
+                                    .toList();
+                        }
+                        StringBuilder sb = new StringBuilder();
+                        sb.append("搜索结果 query=").append(query).append(" root=").append(root).append("\n");
+                        int count = 0;
+                        for (Path match : matches) {
+                            if (count >= maxResults) {
+                                sb.append("...（已截断，最多 ").append(maxResults).append(" 项）\n");
+                                break;
+                            }
+                            sb.append("- ").append(root.relativize(match)).append("\n");
+                            count++;
+                        }
+                        if (count == 0) {
+                            sb.append("(无匹配文件)\n");
+                        }
+                        return sb.toString();
+                    } catch (Exception e) {
+                        return "搜索文件失败: " + e.getMessage();
+                    }
+                }
+        ));
     }
 
     private void registerShellTools () {
@@ -199,6 +311,52 @@ public class ToolRegistry {
     /**
      * 创建参数定义
      */
+    private static boolean isIgnoredPath(Path root, Path path) {
+        Path relative;
+        try {
+            relative = root.relativize(path);
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+        for (Path part : relative) {
+            String name = part.toString();
+            if (name.equals(".git") || name.equals("target") || name.equals(".idea")
+                    || name.equals(".codex") || name.equals(".agents")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int parseInt(String value, int defaultValue) {
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    private static boolean parseBoolean(String value, boolean defaultValue) {
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+        String normalized = value.trim().toLowerCase();
+        if ("true".equals(normalized) || "yes".equals(normalized) || "1".equals(normalized)) {
+            return true;
+        }
+        if ("false".equals(normalized) || "no".equals(normalized) || "0".equals(normalized)) {
+            return false;
+        }
+        return defaultValue;
+    }
+
+    private static int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
     private JsonNode createParameters(Param... params) {
         ObjectNode parameters = mapper.createObjectNode();
         parameters.put("type", "object");
@@ -219,6 +377,17 @@ public class ToolRegistry {
 
     public List<LlmClient.Tool> getToolDefinitions() {
         return tools.values().stream()
+                .map(t -> new LlmClient.Tool(t.name(), t.description(), t.parameters()))
+                .toList();
+    }
+
+    public List<LlmClient.Tool> getToolDefinitions(Collection<String> allowedToolNames) {
+        Set<String> allowed = normalizeAllowedToolNames(allowedToolNames);
+        if (allowed.isEmpty()) {
+            return List.of();
+        }
+        return tools.values().stream()
+                .filter(t -> allowed.contains(t.name()))
                 .map(t -> new LlmClient.Tool(t.name(), t.description(), t.parameters()))
                 .toList();
     }
@@ -255,8 +424,24 @@ public class ToolRegistry {
     }
 
     public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls) {
+        return executeTools(toolCalls, null);
+    }
+
+    public List<ToolExecutionResult> executeTools(List<LlmClient.ToolCall> toolCalls, Collection<String> allowedToolNames) {
         if (toolCalls == null || toolCalls.isEmpty()) {
             return List.of();
+        }
+        Set<String> allowed = normalizeAllowedToolNames(allowedToolNames);
+        if (!allowed.isEmpty()) {
+            for (LlmClient.ToolCall toolCall : toolCalls) {
+                if (!allowed.contains(toolName(toolCall))) {
+                    List<ToolExecutionResult> results = new ArrayList<>(toolCalls.size());
+                    for (LlmClient.ToolCall call : toolCalls) {
+                        results.add(failureResult(call, "工具不在当前子Agent允许范围内: " + toolName(call)));
+                    }
+                    return List.copyOf(results);
+                }
+            }
         }
 
         long toolCallingId = TOOL_CALLING_SEQUENCE.incrementAndGet();
@@ -282,6 +467,18 @@ public class ToolRegistry {
         } finally {
             releaseBatchReservation(reservation, toolCallingId);
         }
+    }
+
+    private Set<String> normalizeAllowedToolNames(Collection<String> allowedToolNames) {
+        if (allowedToolNames == null || allowedToolNames.isEmpty()) {
+            return Set.of();
+        }
+        return allowedToolNames.stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(name -> !name.isEmpty())
+                .filter(tools::containsKey)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
     }
 
     private List<ToolExecutionResult> executeToolsConcurrently(List<LlmClient.ToolCall> toolCalls, long toolCallingId) {

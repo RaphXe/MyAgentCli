@@ -88,8 +88,12 @@ public class TaskBoard {
 
     public synchronized boolean markReadyForReview(String taskId, String agentId, String artifact) {
         TaskItem task = tasks.get(taskId);
-        if (task == null || !agentId.equals(task.ownerAgentId())) return false;
-        if (task.status() != TaskStatus.IN_PROGRESS && task.status() != TaskStatus.CLAIMED && task.status() != TaskStatus.REJECTED) {
+        if (task == null || agentId == null || agentId.isBlank()) return false;
+        if (task.ownerAgentId() != null && !agentId.equals(task.ownerAgentId())) return false;
+        if (task.status() != TaskStatus.IN_PROGRESS
+                && task.status() != TaskStatus.CLAIMED
+                && task.status() != TaskStatus.REJECTED
+                && !(task.ownerAgentId() == null && task.status() == TaskStatus.TODO && dependenciesDone(task))) {
             return false;
         }
         List<String> artifacts = appendIfPresent(task.artifacts(), artifact);
@@ -209,7 +213,9 @@ public class TaskBoard {
     private boolean dependenciesDone(TaskItem task) {
         for (String depId : task.dependencies()) {
             TaskItem dep = tasks.get(depId);
-            if (dep == null || dep.status() != TaskStatus.DONE) return false;
+            if (dep == null || (dep.status() != TaskStatus.DONE && dep.status() != TaskStatus.APPROVED)) {
+                return false;
+            }
         }
         return true;
     }
