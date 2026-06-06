@@ -35,4 +35,31 @@ class TaskBoardStateTest {
         assertEquals("researcher", updated.ownerAgentId());
         assertTrue(updated.artifacts().contains("优化建议报告"));
     }
+
+    @Test
+    void claimedTaskCanBeCompletedByOwnerWithoutSeparateStart() {
+        TaskBoard board = new TaskBoard();
+        TaskBoard.TaskItem task = board.createTask("探索目录现状", "查看目录是否存在", List.of());
+
+        assertTrue(board.claimTask(task.id(), "researcher"));
+        assertTrue(board.completeTask(task.id(), "researcher"));
+
+        TaskBoard.TaskItem updated = board.get(task.id());
+        assertEquals(TaskBoard.TaskStatus.DONE, updated.status());
+        assertEquals("researcher", updated.ownerAgentId());
+    }
+
+    @Test
+    void unownedReadyTaskCanBeCompletedAndAssignedToCompleter() {
+        TaskBoard board = new TaskBoard();
+        TaskBoard.TaskItem dependency = board.createTask("创建 pom.xml", "创建基础文件", List.of());
+        TaskBoard.TaskItem next = board.createTask("实现演示类", "实现多个源码文件", List.of(dependency.id()));
+
+        assertTrue(board.completeTask(dependency.id(), "coder"));
+        assertTrue(board.completeTask(next.id(), "coder"));
+
+        TaskBoard.TaskItem updated = board.get(next.id());
+        assertEquals(TaskBoard.TaskStatus.DONE, updated.status());
+        assertEquals("coder", updated.ownerAgentId());
+    }
 }

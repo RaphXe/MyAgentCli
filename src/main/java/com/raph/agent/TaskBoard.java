@@ -117,12 +117,17 @@ public class TaskBoard {
 
     public synchronized boolean completeTask(String taskId, String agentId) {
         TaskItem task = tasks.get(taskId);
-        if (task == null) return false;
+        if (task == null || agentId == null || agentId.isBlank()) return false;
         if (task.ownerAgentId() != null && !task.ownerAgentId().equals(agentId)) return false;
-        if (task.status() != TaskStatus.APPROVED && task.status() != TaskStatus.IN_PROGRESS && task.status() != TaskStatus.READY_FOR_REVIEW) {
+        if (task.status() != TaskStatus.APPROVED
+                && task.status() != TaskStatus.IN_PROGRESS
+                && task.status() != TaskStatus.READY_FOR_REVIEW
+                && task.status() != TaskStatus.CLAIMED
+                && !(task.ownerAgentId() == null && task.status() == TaskStatus.TODO && dependenciesDone(task))) {
             return false;
         }
-        tasks.put(taskId, copy(task, TaskStatus.DONE, task.ownerAgentId(), task.artifacts(), task.notes()));
+        String owner = task.ownerAgentId() == null || task.ownerAgentId().isBlank() ? agentId : task.ownerAgentId();
+        tasks.put(taskId, copy(task, TaskStatus.DONE, owner, task.artifacts(), task.notes()));
         return true;
     }
 

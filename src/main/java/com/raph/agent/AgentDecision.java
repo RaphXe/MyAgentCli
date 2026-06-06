@@ -28,10 +28,20 @@ public record AgentDecision(String status, List<Action> actions, String finalAns
             String note,
             String reason,
             String role,
+            String mode,
             String prompt,
             String parentTaskId,
             List<String> allowedTools,
+            List<SubAgentChild> children,
             Map<String, String> params
+    ) {}
+
+    public record SubAgentChild(
+            String title,
+            String role,
+            String mode,
+            String prompt,
+            List<String> allowedTools
     ) {}
 
     public static AgentDecision empty() {
@@ -43,7 +53,7 @@ public record AgentDecision(String status, List<Action> actions, String finalAns
         return new AgentDecision("reported", List.of(new Action(
                 "send_message", AgentMessage.BROADCAST, "REPORT_PROGRESS", content,
                 null, null, null, List.of(), null, null, null,
-                null, null, null, List.of(), Map.of()
+                null, null, null, null, List.of(), List.of(), Map.of()
         )), null);
     }
 
@@ -71,9 +81,11 @@ public record AgentDecision(String status, List<Action> actions, String finalAns
                             text(node, "note", null),
                             text(node, "reason", null),
                             text(node, "role", null),
+                            text(node, "mode", null),
                             text(node, "prompt", null),
                             text(node, "parent_task_id", null),
                             stringList(node.path("allowed_tools")),
+                            children(node.path("children")),
                             params(node)
                     ));
                 }
@@ -93,7 +105,7 @@ public record AgentDecision(String status, List<Action> actions, String finalAns
             String key = entry.getKey();
             if (List.of("type", "to", "message_type", "content", "task_id", "title", "description",
                     "dependencies", "artifact", "note", "reason", "role", "prompt",
-                    "parent_task_id", "allowed_tools").contains(key)) {
+                    "mode", "parent_task_id", "allowed_tools", "children").contains(key)) {
                 continue;
             }
             JsonNode value = entry.getValue();
@@ -136,6 +148,22 @@ public record AgentDecision(String status, List<Action> actions, String finalAns
         List<String> values = new ArrayList<>();
         for (JsonNode item : node) {
             if (!item.isNull()) values.add(item.asText());
+        }
+        return List.copyOf(values);
+    }
+
+    private static List<SubAgentChild> children(JsonNode node) {
+        if (!node.isArray()) return List.of();
+        List<SubAgentChild> values = new ArrayList<>();
+        for (JsonNode item : node) {
+            if (item == null || item.isNull()) continue;
+            values.add(new SubAgentChild(
+                    text(item, "title", null),
+                    text(item, "role", null),
+                    text(item, "mode", null),
+                    text(item, "prompt", null),
+                    stringList(item.path("allowed_tools"))
+            ));
         }
         return List.copyOf(values);
     }

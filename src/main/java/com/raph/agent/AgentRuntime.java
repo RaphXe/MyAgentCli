@@ -274,16 +274,13 @@ public class AgentRuntime {
         }
 
         List<AgentDecision.Action> actions = decision.actions() == null ? List.of() : decision.actions();
-        List<AgentDecision.Action> subAgentActions = actions.stream()
-                .filter(action -> action != null && action.type() != null)
-                .filter(action -> "spawn_subagent".equals(action.type().trim().toLowerCase()))
-                .toList();
-        if (!subAgentActions.isEmpty()) {
+        List<SubAgentRequestSpec> subAgentRequests = collectSubAgentRequests(actions);
+        if (!subAgentRequests.isEmpty()) {
             if (agent.role() == AgentRole.Researcher || agent.role() == AgentRole.Coder) {
-                changed |= runSubAgents(threadId, agent, subAgentActions, log);
+                changed |= runSubAgents(threadId, agent, subAgentRequests, log);
             } else {
                 logLine(log, "│   ⊘ spawn_subagent ignored for " + agent.id() + " (" + agent.role()
-                        + "); only Researcher/Coder can spawn read-only subagents");
+                        + "); only Researcher/Coder can spawn subagents");
             }
         }
 
@@ -291,7 +288,7 @@ public class AgentRuntime {
             if (action == null || action.type() == null) continue;
             String type = action.type().trim().toLowerCase();
             switch (type) {
-                case "spawn_subagent" -> {
+                case "spawn_subagent", "spawn_subagents" -> {
                     // 子 Agent 已按批次并发执行，结果通过 ANSWER 回投给父 Agent。
                 }
                 case "send_message" -> {
@@ -397,12 +394,17 @@ public class AgentRuntime {
                     logLine(log, "│   ★ final: " + shorten(finalAnswer));
                     changed = true;
                 }
-                case "read_file", "write_file", "list_dir", "execute_command", "create_project" -> {
-                    String result = executeToolAction(type, action);
-                    messageBus.send(AgentMessage.of(threadId, "tool:" + type, agent.id(),
-                            AgentMessage.Type.ANSWER, result));
-                    logLine(log, "│   🔧 tool " + type + " -> " + agent.id() + ": " + shorten(result));
-                    changed = true;
+                case "read_file", "write_file", "list_dir", "project_tree", "search_files",
+                        "execute_command", "create_project" -> {
+                    if (!canExecuteToolAction(agent, type)) {
+                        logLine(log, "│   ⊘ tool " + type + " denied for " + agent.id() + " (" + agent.role() + ")");
+                    } else {
+                        String result = executeToolAction(type, action);
+                        messageBus.send(AgentMessage.of(threadId, "tool:" + type, agent.id(),
+                                AgentMessage.Type.ANSWER, result));
+                        logLine(log, "│   🔧 tool " + type + " -> " + agent.id() + ": " + shorten(result));
+                        changed = true;
+                    }
                 }
                 default -> logLine(log, "│   ? unknown action: " + action.type());
             }
@@ -410,9 +412,42 @@ public class AgentRuntime {
         return changed;
     }
 
+    private List<SubAgentRequestSpec> collectSubAgentRequests(List<AgentDecision.Action> actions) {
+        List<SubAgentRequestSpec> requests = new ArrayList<>();
+        if (actions == null) return requests;
+        for (AgentDecision.Action action : actions) {
+            if (action == null || action.type() == null) continue;
+            String type = action.type().trim().toLowerCase();
+            if ("spawn_subagent".equals(type)) {
+                requests.add(new SubAgentRequestSpec(
+                        action.title(), action.role(), action.prompt(), action.content(),
+                        action.parentTaskId(), action.allowedTools(), action.mode()
+                ));
+            } else if ("spawn_subagents".equals(type)) {
+                if (action.children() == null || action.children().isEmpty()) {
+                    requests.add(new SubAgentRequestSpec(
+                            action.title(), action.role(), action.prompt(), action.content(),
+                            action.parentTaskId(), action.allowedTools(), action.mode()
+                    ));
+                    continue;
+                }
+                for (AgentDecision.SubAgentChild child : action.children()) {
+                    requests.add(new SubAgentRequestSpec(
+                            child.title(), child.role(), child.prompt(), action.content(),
+                            action.parentTaskId(),
+                            child.allowedTools() == null || child.allowedTools().isEmpty()
+                                    ? action.allowedTools() : child.allowedTools(),
+                            child.mode() == null || child.mode().isBlank() ? action.mode() : child.mode()
+                    ));
+                }
+            }
+        }
+        return requests.size() > MAX_PARALLEL_SUBAGENTS ? requests.subList(0, MAX_PARALLEL_SUBAGENTS) : requests;
+    }
+
     private boolean runSubAgents(String threadId, TeamAgent parentAgent,
-                                 List<AgentDecision.Action> actions, StringBuilder log) {
-        int poolSize = Math.min(MAX_PARALLEL_SUBAGENTS, actions.size());
+                                 List<SubAgentRequestSpec> requests, StringBuilder log) {
+        int poolSize = Math.min(MAX_PARALLEL_SUBAGENTS, requests.size());
         ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
             Thread t = new Thread(r, "sub-agent-" + parentAgent.id());
             t.setDaemon(true);
@@ -421,13 +456,24 @@ public class AgentRuntime {
         CompletionService<SubAgentRunResult> completionService = new ExecutorCompletionService<>(executor);
         List<Future<SubAgentRunResult>> futures = new ArrayList<>();
 
-        for (AgentDecision.Action action : actions) {
-            logLine(log, "│   ⇢ spawn subagent " + blankToDefault(action.title(), "untitled")
-                    + " role=" + blankToDefault(action.role(), "Researcher"));
-            futures.add(completionService.submit(() -> runOneSubAgent(action)));
+        logLine(log, "│   ⇢ spawn subagent batch parent=" + parentAgent.id() + " children=" + requests.size());
+        for (SubAgentRequestSpec rawRequest : requests) {
+            SubAgentRequestSpec request = normalizeSubAgentRequest(parentAgent, rawRequest, log);
+            if (request == null) {
+                continue;
+            }
+            logLine(log, "│     - child " + blankToDefault(request.title(), "untitled")
+                    + " role=" + blankToDefault(request.role(), "Researcher")
+                    + " mode=" + request.mode());
+            futures.add(completionService.submit(() -> runOneSubAgent(request, log)));
+        }
+
+        if (futures.isEmpty()) {
+            return false;
         }
 
         boolean changed = false;
+        List<SubAgentRunResult> results = new ArrayList<>();
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(SUBAGENT_TIMEOUT_SECONDS);
         int completed = 0;
         try {
@@ -446,11 +492,18 @@ public class AgentRuntime {
                     result = future.get();
                 } catch (Exception e) {
                     result = new SubAgentRunResult("子Agent执行失败", "Researcher", null,
-                            "子Agent执行失败: " + e.getMessage(), true);
+                            SubAgentRunner.Report.incomplete("子Agent执行失败: " + e.getMessage(), null),
+                            true, new SubAgentRunner.RunStats());
                 }
-                messageBus.send(AgentMessage.withMetadata(threadId, "subagent:" + parentAgent.id(), parentAgent.id(),
-                        AgentMessage.Type.ANSWER, formatSubAgentResult(result), subAgentMetadata(result)));
-                logLine(log, "│   ↩ subagent -> " + parentAgent.id() + ": " + shorten(result.report()));
+                results.add(result);
+                logLine(log, "│   ↩ subagent " + blankToDefault(result.title(), "untitled")
+                        + " -> " + parentAgent.id()
+                        + ": status=" + result.report().status()
+                        + ", tools=" + result.stats().toolIterations()
+                        + ", files=" + result.report().filesRead().size()
+                        + ", writes=" + result.report().filesWritten().size()
+                        + ", proposed_changes=" + result.report().proposedChanges().size()
+                        + ", summary=" + shorten(result.report().summary()));
                 changed = true;
             }
         } catch (InterruptedException e) {
@@ -467,53 +520,122 @@ public class AgentRuntime {
 
         int timedOut = futures.size() - completed;
         if (timedOut > 0) {
-            messageBus.send(AgentMessage.of(threadId, "runtime", parentAgent.id(),
-                    AgentMessage.Type.ANSWER, "有 " + timedOut + " 个子Agent超时或被取消，请基于已返回结果继续。"));
             logLine(log, "│   ! subagent timeout/cancelled count=" + timedOut);
+            results.add(new SubAgentRunResult("超时子Agent", "Researcher", null,
+                    SubAgentRunner.Report.incomplete("有 " + timedOut + " 个子Agent超时或被取消。", null),
+                    true, new SubAgentRunner.RunStats()));
             changed = true;
+        }
+        if (!results.isEmpty()) {
+            messageBus.send(AgentMessage.withMetadata(threadId, "subagent:" + parentAgent.id(), parentAgent.id(),
+                    AgentMessage.Type.ANSWER, formatSubAgentBatchResult(results), subAgentBatchMetadata(results)));
+            logLine(log, "│   ↩ subagent batch -> " + parentAgent.id()
+                    + ": 子Agent批次结果 children=" + results.size());
         }
         return changed;
     }
 
-    private SubAgentRunResult runOneSubAgent(AgentDecision.Action action) throws IOException {
-        SubAgentRunner runner = new SubAgentRunner(client, toolRegistry);
-        SubAgentRunner.Result result = runner.run(new SubAgentRunner.Request(
-                action.title(),
-                action.role(),
-                action.prompt(),
-                action.content(),
-                action.parentTaskId(),
-                action.allowedTools()
-        ));
-        return new SubAgentRunResult(result.title(), result.role(), result.parentTaskId(),
-                result.report(), result.incomplete());
+    private SubAgentRequestSpec normalizeSubAgentRequest(TeamAgent parentAgent, SubAgentRequestSpec request, StringBuilder log) {
+        String mode = normalizeSubAgentMode(request.mode());
+        if ("write".equals(mode) && parentAgent.role() != AgentRole.Coder) {
+            logLine(log, "│     ⊘ child " + blankToDefault(request.title(), "untitled")
+                    + " write mode denied for parent=" + parentAgent.id() + " (" + parentAgent.role() + ")");
+            return null;
+        }
+        String role = request.role();
+        if ("write".equals(mode) && (role == null || role.isBlank())) {
+            role = "Coder";
+        }
+        return new SubAgentRequestSpec(
+                request.title(),
+                role,
+                request.prompt(),
+                request.content(),
+                request.parentTaskId(),
+                request.allowedTools(),
+                mode
+        );
     }
 
-    private Map<String, String> subAgentMetadata(SubAgentRunResult result) {
+    private String normalizeSubAgentMode(String mode) {
+        if (mode == null || mode.isBlank()) {
+            return "read";
+        }
+        String normalized = mode.trim().toLowerCase();
+        if ("write".equals(normalized) || "writer".equals(normalized) || "mutation".equals(normalized)) {
+            return "write";
+        }
+        return "read";
+    }
+
+    private SubAgentRunResult runOneSubAgent(SubAgentRequestSpec request, StringBuilder log) throws IOException {
+        SubAgentRunner runner = new SubAgentRunner(client, toolRegistry);
+        SubAgentRunner.Result result = runner.run(new SubAgentRunner.Request(
+                request.title(),
+                request.role(),
+                request.mode(),
+                request.prompt(),
+                request.content(),
+                request.parentTaskId(),
+                request.allowedTools()
+        ), event -> logLine(log, "│       · subagent " + blankToDefault(request.title(), "untitled")
+                + " " + shorten(event)));
+        return new SubAgentRunResult(result.title(), result.role(), result.parentTaskId(),
+                result.report(), result.incomplete(), result.stats());
+    }
+
+    private Map<String, String> subAgentBatchMetadata(List<SubAgentRunResult> results) {
         Map<String, String> metadata = new LinkedHashMap<>();
-        metadata.put("subagent_title", blankToDefault(result.title(), ""));
-        metadata.put("subagent_role", blankToDefault(result.role(), "Researcher"));
-        metadata.put("incomplete", String.valueOf(result.incomplete()));
-        if (result.parentTaskId() != null && !result.parentTaskId().isBlank()) {
-            metadata.put("parent_task_id", result.parentTaskId());
+        metadata.put("subagent_count", String.valueOf(results.size()));
+        long incomplete = results.stream().filter(SubAgentRunResult::incomplete).count();
+        metadata.put("incomplete_count", String.valueOf(incomplete));
+        for (SubAgentRunResult result : results) {
+            if (result.parentTaskId() != null && !result.parentTaskId().isBlank()) {
+                metadata.put("parent_task_id", result.parentTaskId());
+                break;
+            }
         }
         return Map.copyOf(metadata);
     }
 
-    private String formatSubAgentResult(SubAgentRunResult result) {
-        return "子Agent报告"
-                + "\n标题: " + blankToDefault(result.title(), "未命名子任务")
-                + "\n角色: " + blankToDefault(result.role(), "Researcher")
-                + (result.parentTaskId() == null || result.parentTaskId().isBlank()
-                ? "" : "\n父任务ID: " + result.parentTaskId())
-                + "\n状态: " + (result.incomplete() ? "未完成/受限" : "完成")
-                + "\n\n" + blankToDefault(result.report(), "无报告内容。");
+    private String formatSubAgentBatchResult(List<SubAgentRunResult> results) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("子Agent批次结果\n");
+        sb.append("children=").append(results.size()).append("\n");
+        int index = 1;
+        for (SubAgentRunResult result : results) {
+            sb.append("\n## child_").append(index++).append("\n");
+            sb.append("title=").append(blankToDefault(result.title(), "未命名子任务")).append("\n");
+            sb.append("role=").append(blankToDefault(result.role(), "Researcher")).append("\n");
+            if (result.parentTaskId() != null && !result.parentTaskId().isBlank()) {
+                sb.append("parent_task_id=").append(result.parentTaskId()).append("\n");
+            }
+            sb.append("tool_iterations=").append(result.stats().toolIterations()).append("\n");
+            if (!result.stats().toolCalls().isEmpty()) {
+                sb.append("tool_calls=").append(result.stats().toolCalls()).append("\n");
+            }
+            sb.append(result.report().compact()).append("\n");
+        }
+        sb.append("\n请父Agent基于以上结构化结果聚合，不要重复探索已覆盖文件；read 子Agent只提供证据或 proposed_changes，write 子Agent若已写入文件，父 Coder 需要继续负责验证、汇总和提交审查。");
+        return sb.toString();
     }
 
     private String inferDelegateTarget(TaskBoard.TaskItem task) {
         String text = ((task.title() == null ? "" : task.title()) + " "
                 + (task.description() == null ? "" : task.description())).toLowerCase();
         if (text.contains("审查") || text.contains("review")) return "reviewer";
+        if ((text.contains("探索") || text.contains("查看") || text.contains("读取")
+                || text.contains("收集") || text.contains("目录现状") || text.contains("是否存在"))
+                && !(text.contains("写入") || text.contains("实现") || text.contains("创建maven")
+                || text.contains("创建项目结构") || text.contains("基础文件"))) {
+            return "researcher";
+        }
+        if (text.contains("创建") || text.contains("生成") || text.contains("新增")
+                || text.contains("写入") || text.contains("搭建") || text.contains("脚手架")
+                || text.contains("基础文件") || text.contains("主入口文件")
+                || text.contains("create") || text.contains("write")) {
+            return "coder";
+        }
         if (text.contains("探索") || text.contains("结构") || text.contains("技术栈")
                 || text.contains("读取") || text.contains("收集")) return "researcher";
         if (text.contains("优化方向") || text.contains("优化建议") || text.contains("建议")
@@ -631,14 +753,34 @@ public class AgentRuntime {
             });
         }
         // 常见模型会把参数写在 content/description 里，给几个保守兜底。
-        if (!args.has("path") && ("read_file".equals(toolName) || "list_dir".equals(toolName))) {
+        if (!args.has("path") && ("read_file".equals(toolName)
+                || "list_dir".equals(toolName)
+                || "project_tree".equals(toolName)
+                || "search_files".equals(toolName))) {
             String path = firstNonBlank(action.content(), action.description(), ".");
             args.put("path", path);
         }
         if (!args.has("command") && "execute_command".equals(toolName)) {
             args.put("command", firstNonBlank(action.content(), action.description(), "pwd"));
         }
+        if (!args.has("content") && "write_file".equals(toolName)) {
+            args.put("content", firstNonBlank(action.content(), action.description(), ""));
+        }
         return toolRegistry.executeTool(toolName, args.toString());
+    }
+
+    private boolean canExecuteToolAction(TeamAgent agent, String toolName) {
+        if (agent == null || toolName == null) return false;
+        return switch (toolName) {
+            case "write_file", "create_project" -> agent.role() == AgentRole.Coder;
+            case "execute_command" -> agent.role() == AgentRole.Coder;
+            case "read_file", "list_dir", "project_tree", "search_files" ->
+                    agent.role() == AgentRole.Researcher
+                            || agent.role() == AgentRole.Coder
+                            || agent.role() == AgentRole.Reviewer
+                            || agent.role() == AgentRole.Tester;
+            default -> false;
+        };
     }
 
     private String renderRecentTranscript() {
@@ -670,8 +812,19 @@ public class AgentRuntime {
             String title,
             String role,
             String parentTaskId,
-            String report,
-            boolean incomplete
+            SubAgentRunner.Report report,
+            boolean incomplete,
+            SubAgentRunner.RunStats stats
+    ) {}
+
+    private record SubAgentRequestSpec(
+            String title,
+            String role,
+            String prompt,
+            String content,
+            String parentTaskId,
+            List<String> allowedTools,
+            String mode
     ) {}
 
     private static AgentMessage.Type parseMessageType(String raw) {
