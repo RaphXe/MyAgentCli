@@ -1,6 +1,7 @@
 package com.raph.hitl;
 
 import com.raph.tool.ToolRegistry;
+import com.raph.tool.ToolRegistry.ToolMetadata;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -34,8 +35,9 @@ public class HitlToolRegistry extends ToolRegistry {
         WorkspaceAccess workspaceAccess = workspaceAccess(toolName, parsed.stringArgs());
         boolean needsWorkspaceApproval = workspaceAccess.requiresApproval()
                 && !workspacePolicy().isInsideWorkspace(workspaceAccess.targetPath());
+        ToolMetadata metadata = toolMetadata(toolName);
         boolean needsDangerApproval = hitlHandler.isEnabled()
-                && ApprovalPolicy.requiresApproval(toolName)
+                && ApprovalPolicy.requiresApproval(toolName, metadata)
                 && !isAlreadyApprovedDangerousTool(toolName);
 
         if (!needsWorkspaceApproval && !needsDangerApproval) {
@@ -54,15 +56,16 @@ public class HitlToolRegistry extends ToolRegistry {
             WorkspaceAccess workspaceAccess = initialWorkspaceAccess;
             boolean needsWorkspaceApproval = workspaceAccess.requiresApproval()
                     && !workspacePolicy().isInsideWorkspace(workspaceAccess.targetPath());
+            ToolMetadata metadata = toolMetadata(toolName);
             boolean needsDangerApproval = hitlHandler.isEnabled()
-                    && ApprovalPolicy.requiresApproval(toolName)
+                    && ApprovalPolicy.requiresApproval(toolName, metadata)
                     && !isAlreadyApprovedDangerousTool(toolName);
 
             if (!needsWorkspaceApproval && !needsDangerApproval) {
                 return ApprovalOutcome.approved(arguments);
             }
 
-            ApprovalRequest request = ApprovalRequest.of(toolName, arguments, null);
+            ApprovalRequest request = ApprovalRequest.of(toolName, arguments, null, null, metadata);
             if (needsWorkspaceApproval) {
                 request = request.withWorkspaceAccess(
                         workspaceAccess.targetPath().toString(),

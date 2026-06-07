@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MCPServerTest {
@@ -31,6 +32,8 @@ class MCPServerTest {
 
         assertTrue(registry.hasTool("mcp__fake__echo"));
         assertTrue(ApprovalPolicy.requiresApproval("mcp__fake__echo"));
+        assertTrue(ApprovalPolicy.requiresApproval("mcp__fake__echo", registry.toolMetadata("mcp__fake__echo")));
+        assertTrue(registry.toolMetadata("mcp__fake__echo").unknownRisk());
         String result = registry.executeTool("mcp__fake__echo", "{\"message\":\"hi\",\"nested\":{\"a\":1}}");
         assertEquals("echo:hi\nstructuredContent={\"receivedNested\":{\"a\":1}}", result);
         assertEquals("notifications/initialized", transport.methods.get(1));
@@ -92,6 +95,60 @@ class MCPServerTest {
 
         assertTrue(tools.get(0).description().contains("关联 skill"), tools.get(0).description());
         assertTrue(tools.get(0).description().contains("core/agent"), tools.get(0).description());
+    }
+
+    @Test
+    void configuredReadOnlyMcpToolDoesNotRequireDangerApproval() throws Exception {
+        ScriptedTransport transport = new ScriptedTransport();
+        MCPServerConfig config = new MCPServerConfig(
+                "fake",
+                "stdio",
+                "unused",
+                List.of(),
+                Map.of(),
+                null,
+                Map.of(),
+                null,
+                List.of(),
+                Map.of(),
+                null,
+                Map.of("echo", new MCPServerConfig.ToolPolicy(true, null, null, null, null, null))
+        );
+        MCPServer server = new MCPServer(config, new JsonRPCClient(transport, Duration.ofSeconds(1)));
+
+        ToolRegistry.Tool tool = server.initializeAndCreateTools().get(0);
+
+        assertEquals("mcp__fake__echo", tool.name());
+        assertFalse(tool.metadata().requiresApproval());
+        assertFalse(ApprovalPolicy.requiresApproval(tool.name(), tool.metadata()));
+        assertEquals("🟢 安全", tool.metadata().dangerLevel());
+    }
+
+    @Test
+    void configuredMcpMutationCarriesPathMetadata() throws Exception {
+        ScriptedTransport transport = new ScriptedTransport();
+        MCPServerConfig config = new MCPServerConfig(
+                "fake",
+                "stdio",
+                "unused",
+                List.of(),
+                Map.of(),
+                null,
+                Map.of(),
+                null,
+                List.of(),
+                Map.of(),
+                null,
+                Map.of("echo", new MCPServerConfig.ToolPolicy(false, true, true, "path", "🔴 高危", "writes"))
+        );
+        MCPServer server = new MCPServer(config, new JsonRPCClient(transport, Duration.ofSeconds(1)));
+
+        ToolRegistry.Tool tool = server.initializeAndCreateTools().get(0);
+
+        assertTrue(tool.metadata().requiresApproval());
+        assertTrue(tool.metadata().mutatesFile());
+        assertEquals("path", tool.metadata().pathArgument());
+        assertEquals("writes", tool.metadata().riskDescription());
     }
 
     private static final class ScriptedTransport implements MCPTransport {

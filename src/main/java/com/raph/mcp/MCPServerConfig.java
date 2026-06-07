@@ -21,7 +21,9 @@ public record MCPServerConfig(
         Map<String, String> headers,
         Integer initTimeoutSeconds,
         List<String> skills,
-        Map<String, List<String>> toolSkills
+        Map<String, List<String>> toolSkills,
+        ToolPolicy defaultToolPolicy,
+        Map<String, ToolPolicy> toolPolicies
 ) {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -33,7 +35,20 @@ public record MCPServerConfig(
                            String url,
                            Map<String, String> headers,
                            Integer initTimeoutSeconds) {
-        this(name, type, command, args, env, url, headers, initTimeoutSeconds, List.of(), Map.of());
+        this(name, type, command, args, env, url, headers, initTimeoutSeconds, List.of(), Map.of(), null, Map.of());
+    }
+
+    public MCPServerConfig(String name,
+                           String type,
+                           String command,
+                           List<String> args,
+                           Map<String, String> env,
+                           String url,
+                           Map<String, String> headers,
+                           Integer initTimeoutSeconds,
+                           List<String> skills,
+                           Map<String, List<String>> toolSkills) {
+        this(name, type, command, args, env, url, headers, initTimeoutSeconds, skills, toolSkills, null, Map.of());
     }
 
     public MCPServerConfig {
@@ -42,6 +57,8 @@ public record MCPServerConfig(
         headers = headers == null ? Map.of() : Map.copyOf(headers);
         skills = skills == null ? List.of() : List.copyOf(skills);
         toolSkills = toolSkills == null ? Map.of() : copyToolSkills(toolSkills);
+        defaultToolPolicy = defaultToolPolicy == null ? null : defaultToolPolicy.normalized();
+        toolPolicies = toolPolicies == null ? Map.of() : copyToolPolicies(toolPolicies);
     }
 
     public static List<MCPServerConfig> load(Path path) throws IOException {
@@ -69,8 +86,23 @@ public record MCPServerConfig(
                 stringMap(node.path("headers")),
                 intValue(node, "init_timeout_seconds"),
                 stringList(node.path("skills")),
-                stringListMap(node.path("tool_skills"))
+                stringListMap(node.path("tool_skills")),
+                toolPolicy(node.path("default_tool_policy")),
+                toolPolicyMap(node.path("tool_policies"))
         );
+    }
+
+    public ToolPolicy policyForTool(String originalToolName) {
+        ToolPolicy exact = originalToolName == null ? null : toolPolicies.get(originalToolName);
+        if (exact != null) {
+            return mergePolicies(defaultPolicy(), exact);
+        }
+        return defaultPolicy();
+    }
+
+    private ToolPolicy defaultPolicy() {
+        ToolPolicy wildcard = toolPolicies.get("*");
+        return mergePolicies(defaultToolPolicy, wildcard);
     }
 
     private static String sanitizeName(String name) {
@@ -140,6 +172,61 @@ public record MCPServerConfig(
         return Map.copyOf(values);
     }
 
+    private static Map<String, ToolPolicy> toolPolicyMap(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return Map.of();
+        }
+        Map<String, ToolPolicy> values = new LinkedHashMap<>();
+        node.fields().forEachRemaining(entry -> {
+            ToolPolicy policy = toolPolicy(entry.getValue());
+            if (policy != null && entry.getKey() != null && !entry.getKey().isBlank()) {
+                values.put(entry.getKey().trim(), policy);
+            }
+        });
+        return copyToolPolicies(values);
+    }
+
+    private static Map<String, ToolPolicy> copyToolPolicies(Map<String, ToolPolicy> source) {
+        Map<String, ToolPolicy> values = new LinkedHashMap<>();
+        source.forEach((key, value) -> {
+            if (key != null && !key.isBlank() && value != null) {
+                values.put(key.trim(), value.normalized());
+            }
+        });
+        return Map.copyOf(values);
+    }
+
+    private static ToolPolicy toolPolicy(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        return new ToolPolicy(
+                booleanValue(node, "read_only"),
+                booleanValue(node, "requires_approval"),
+                booleanValue(node, "mutates_file"),
+                text(node, "path_argument", null),
+                text(node, "danger_level", null),
+                text(node, "risk_description", null)
+        ).normalized();
+    }
+
+    private static ToolPolicy mergePolicies(ToolPolicy base, ToolPolicy override) {
+        if (base == null) {
+            return override == null ? null : override.normalized();
+        }
+        if (override == null) {
+            return base.normalized();
+        }
+        return new ToolPolicy(
+                override.readOnly() == null ? base.readOnly() : override.readOnly(),
+                override.requiresApproval() == null ? base.requiresApproval() : override.requiresApproval(),
+                override.mutatesFile() == null ? base.mutatesFile() : override.mutatesFile(),
+                override.pathArgument() == null ? base.pathArgument() : override.pathArgument(),
+                override.dangerLevel() == null ? base.dangerLevel() : override.dangerLevel(),
+                override.riskDescription() == null ? base.riskDescription() : override.riskDescription()
+        ).normalized();
+    }
+
     private static String substituteEnv(String value) {
         if (value == null || value.isBlank()) {
             return value;
@@ -172,6 +259,47 @@ public record MCPServerConfig(
             return parsed > 0 ? parsed : null;
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    private static Boolean booleanValue(JsonNode node, String field) {
+        JsonNode value = node == null ? null : node.path(field);
+        if (value == null || value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (value.isBoolean()) {
+            return value.asBoolean();
+        }
+        String text = value.asText();
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        return switch (text.trim().toLowerCase()) {
+            case "true", "yes", "1" -> true;
+            case "false", "no", "0" -> false;
+            default -> null;
+        };
+    }
+
+    public record ToolPolicy(Boolean readOnly,
+                             Boolean requiresApproval,
+                             Boolean mutatesFile,
+                             String pathArgument,
+                             String dangerLevel,
+                             String riskDescription) {
+        private ToolPolicy normalized() {
+            return new ToolPolicy(
+                    readOnly,
+                    requiresApproval,
+                    mutatesFile,
+                    blankToNull(pathArgument),
+                    blankToNull(dangerLevel),
+                    blankToNull(riskDescription)
+            );
+        }
+
+        private static String blankToNull(String value) {
+            return value == null || value.isBlank() ? null : value.trim();
         }
     }
 }

@@ -58,11 +58,40 @@ public class MCPServer implements AutoCloseable {
                     mcpTool.localName(),
                     descriptionWithSkillUsage(mcpTool),
                     mcpTool.inputSchema(),
-                    ToolRegistry.ToolMetadata.readOnly(),
+                    metadataFor(mcpTool.originalName()),
                     args -> callToolAsString(mcpTool.originalName(), args)
             ));
         }
         return List.copyOf(tools);
+    }
+
+    private ToolRegistry.ToolMetadata metadataFor(String originalToolName) {
+        MCPServerConfig.ToolPolicy policy = config.policyForTool(originalToolName);
+        if (policy == null) {
+            return ToolRegistry.ToolMetadata.externalMcpDefault(config.name());
+        }
+        boolean mutatesFile = Boolean.TRUE.equals(policy.mutatesFile());
+        boolean requiresApproval;
+        if (policy.requiresApproval() != null) {
+            requiresApproval = policy.requiresApproval();
+        } else if (Boolean.TRUE.equals(policy.readOnly()) && !mutatesFile) {
+            requiresApproval = false;
+        } else {
+            requiresApproval = true;
+        }
+        String dangerLevel = firstNonBlank(policy.dangerLevel(), requiresApproval ? "🟡 MCP" : "🟢 安全");
+        String riskDescription = firstNonBlank(policy.riskDescription(),
+                requiresApproval
+                        ? "将调用 MCP server [" + config.name() + "] 提供的外部工具"
+                        : "配置声明为 MCP 只读工具");
+        return new ToolRegistry.ToolMetadata(
+                mutatesFile,
+                policy.pathArgument(),
+                requiresApproval,
+                false,
+                dangerLevel,
+                riskDescription
+        );
     }
 
     private void initialize() throws MCPException {
@@ -184,6 +213,10 @@ public class MCPServer implements AutoCloseable {
             return value;
         }
         return value.substring(0, Math.max(0, maxChars - 3)) + "...";
+    }
+
+    private static String firstNonBlank(String first, String fallback) {
+        return first == null || first.isBlank() ? fallback : first;
     }
 
     private static String text(JsonNode node, String field, String defaultValue) {

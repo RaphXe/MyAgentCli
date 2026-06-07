@@ -2,6 +2,7 @@ package com.raph.hitl;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.raph.tool.ToolRegistry;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -32,11 +33,16 @@ public record ApprovalRequest(
     }
 
     public static ApprovalRequest of(String toolName, String arguments, String suggestion, String callerContext) {
+        return of(toolName, arguments, suggestion, callerContext, null);
+    }
+
+    public static ApprovalRequest of(String toolName, String arguments, String suggestion,
+                                     String callerContext, ToolRegistry.ToolMetadata metadata) {
         return new ApprovalRequest(
                 toolName,
                 arguments,
-                ApprovalPolicy.getDangerLevel(toolName),
-                ApprovalPolicy.getRiskDescription(toolName),
+                ApprovalPolicy.getDangerLevel(toolName, metadata),
+                ApprovalPolicy.getRiskDescription(toolName, metadata),
                 suggestion,
                 callerContext,
                 false,

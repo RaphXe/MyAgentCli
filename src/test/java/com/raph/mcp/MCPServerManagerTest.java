@@ -45,6 +45,8 @@ class MCPServerManagerTest {
         assertTrue(elapsedMillis < 450, "expected concurrent init, elapsed=" + elapsedMillis);
         assertTrue(registry.hasTool("mcp__one__echo"));
         assertTrue(registry.hasTool("mcp__two__echo"));
+        assertTrue(manager.statusReport().contains("initMs="), manager.statusReport());
+        assertTrue(String.join("\n", logs).contains("initMs="), logs.toString());
         manager.close();
     }
 

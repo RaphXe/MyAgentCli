@@ -1,5 +1,6 @@
 package com.raph.hitl;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.raph.llm.LlmClient;
 import com.raph.tool.ToolRegistry;
 import com.raph.tool.WorkspacePolicy;
@@ -18,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class HitlWorkspacePolicyTest {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @TempDir
     Path outsideDir;
@@ -177,6 +179,43 @@ class HitlWorkspacePolicyTest {
         assertTrue(results.stream().allMatch(result -> !result.result().contains("工作区访问被拒绝")), results.toString());
         assertEquals(1, handler.requestCount);
         assertTrue(handler.lastRequest.workspaceApprovalRequired());
+    }
+
+    @Test
+    void mcpToolMetadataCanBypassDangerApprovalWhenReadOnly() {
+        QueueHitlHandler handler = new QueueHitlHandler(true);
+        HitlToolRegistry registry = new HitlToolRegistry(handler);
+        registry.registerTool(new ToolRegistry.Tool(
+                "mcp__safe__search",
+                "safe search",
+                MAPPER.createObjectNode().put("type", "object"),
+                ToolRegistry.ToolMetadata.readOnly(),
+                args -> "ok"
+        ));
+
+        String result = registry.executeTool("mcp__safe__search", "{}");
+
+        assertEquals("ok", result);
+        assertEquals(0, handler.requestCount);
+    }
+
+    @Test
+    void mcpToolWithoutPolicyRequiresDangerApprovalByMetadata() {
+        QueueHitlHandler handler = new QueueHitlHandler(true, ApprovalResult.reject("mcp denied"));
+        HitlToolRegistry registry = new HitlToolRegistry(handler);
+        registry.registerTool(new ToolRegistry.Tool(
+                "mcp__unknown__search",
+                "unknown search",
+                MAPPER.createObjectNode().put("type", "object"),
+                ToolRegistry.ToolMetadata.externalMcpDefault("unknown"),
+                args -> "ok"
+        ));
+
+        String result = registry.executeTool("mcp__unknown__search", "{}");
+
+        assertTrue(result.contains("mcp denied"), result);
+        assertEquals(1, handler.requestCount);
+        assertTrue(handler.lastRequest.riskDescription().contains("未声明风险元数据"));
     }
 
     private static LlmClient.ToolCall toolCall(String id, String name, String arguments) {

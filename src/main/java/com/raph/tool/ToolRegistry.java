@@ -42,8 +42,10 @@ public class ToolRegistry {
     private static final int MAX_COMMAND_OUTPUT_CHARS = 64 * 1024;
     private static final int MAX_PARALLEL_TOOLS = 4;
     private static final long TOOL_TIMEOUT_SECONDS = 90;
+    private static final int MAX_AUDIT_EVENTS = 200;
     private static final AtomicLong TOOL_CALLING_SEQUENCE = new AtomicLong();
     private static final ConcurrentHashMap<Path, FileMutationOwner> ACTIVE_FILE_MUTATIONS = new ConcurrentHashMap<>();
+    private final List<ToolAuditEvent> auditEvents = java.util.Collections.synchronizedList(new ArrayList<>());
 
     public ToolRegistry() {
         this(WorkspacePolicy.defaultPolicy());
@@ -66,6 +68,11 @@ public class ToolRegistry {
 
     public synchronized boolean hasTool(String name) {
         return name != null && tools.containsKey(name);
+    }
+
+    public synchronized ToolMetadata toolMetadata(String name) {
+        Tool tool = name == null ? null : tools.get(name);
+        return tool == null ? null : tool.metadata();
     }
 
     public synchronized void unregisterTool(String name) {
@@ -272,7 +279,10 @@ public class ToolRegistry {
                 "execute_command",
                 "执行Shell命令，用于编译、运行、Git操作等",
                 createParameters(new Param("command", "string", "要执行的命令", true)),
-                ToolMetadata.readOnly(),
+                ToolMetadata.requiresApproval(
+                        "🔴 高危",
+                        "将在系统上执行 Shell 命令，可能修改文件、安装软件或影响系统状态"
+                ),
                 args -> {
                     String command = args.get("command");
                     try {
@@ -438,37 +448,49 @@ public class ToolRegistry {
     }
 
     protected String executeTool(String toolName, String arguments, long toolCallingId, boolean batchReservationHeld) {
+        long startedNanos = System.nanoTime();
         Tool tool = tools.get(toolName);
         if (tool == null) {
-            return "工具不存在: " + toolName;
+            String result = "工具不存在: " + toolName;
+            recordAudit(toolName, arguments, result, startedNanos);
+            return result;
         }
 
         ParsedArguments args;
         try {
             args = parseArguments(arguments);
         } catch (Exception e) {
-            return "工具参数解析失败: " + e.getMessage();
+            String result = "工具参数解析失败: " + e.getMessage();
+            recordAudit(toolName, arguments, result, startedNanos);
+            return result;
         }
 
         FileMutationLease lease = FileMutationLease.none();
+        String result = "工具执行未完成";
         try {
             WorkspaceAccess workspaceAccess = workspaceAccess(toolName, args.stringArgs());
             if (workspaceAccess.requiresApproval()
                     && !workspacePolicy.isAllowedOrConsumeOneTime(workspaceAccess.targetPath())) {
-                return workspaceDeniedMessage(workspaceAccess);
+                result = workspaceDeniedMessage(workspaceAccess);
+                return result;
             }
             lease = acquireFileMutationLease(tool, args.stringArgs(), toolCallingId, batchReservationHeld);
             if (lease.errorMessage() != null) {
-                return lease.errorMessage();
+                result = lease.errorMessage();
+                return result;
             }
             if (tool.jsonExecutor() != null) {
-                return tool.jsonExecutor().execute(args.jsonArgs());
+                result = tool.jsonExecutor().execute(args.jsonArgs());
+                return result;
             }
-            return tool.executor().execute(args.stringArgs());
+            result = tool.executor().execute(args.stringArgs());
+            return result;
         } catch (Exception e) {
-            return "工具执行失败: " + e.getMessage();
+            result = "工具执行失败: " + e.getMessage();
+            return result;
         } finally {
             releaseFileMutationLease(lease);
+            recordAudit(toolName, arguments, result, startedNanos);
         }
     }
 
@@ -750,6 +772,12 @@ public class ToolRegistry {
         workspacePolicy.resetSessionState();
     }
 
+    public List<ToolAuditEvent> recentAuditEvents() {
+        synchronized (auditEvents) {
+            return List.copyOf(auditEvents);
+        }
+    }
+
     protected ParsedArguments parseArguments(String arguments) throws IOException {
         Map<String, String> stringArgs = new HashMap<>();
         Map<String, JsonNode> jsonArgs = new HashMap<>();
@@ -780,13 +808,22 @@ public class ToolRegistry {
 
     private WorkspaceTarget workspaceTarget(String toolName, Map<String, String> args) {
         Map<String, String> safeArgs = args == null ? Map.of() : args;
-        return switch (toolName == null ? "" : toolName) {
+        WorkspaceTarget builtInTarget = switch (toolName == null ? "" : toolName) {
             case "read_file", "write_file" -> new WorkspaceTarget(safeArgs.get("path"), false);
             case "list_dir", "project_tree", "search_files" ->
                     new WorkspaceTarget(safeArgs.getOrDefault("path", "."), true);
             case "create_project" -> new WorkspaceTarget(safeArgs.get("name"), true);
             default -> null;
         };
+        if (builtInTarget != null) {
+            return builtInTarget;
+        }
+        Tool tool = toolName == null ? null : tools.get(toolName);
+        ToolMetadata metadata = tool == null ? null : tool.metadata();
+        if (metadata != null && metadata.pathArgument() != null && !metadata.pathArgument().isBlank()) {
+            return new WorkspaceTarget(safeArgs.get(metadata.pathArgument()), false);
+        }
+        return null;
     }
 
     private static List<String> absolutePathsInCommand(String command) {
@@ -934,6 +971,58 @@ public class ToolRegistry {
         }
     }
 
+    private void recordAudit(String toolName, String arguments, String result, long startedNanos) {
+        long elapsedMillis = Math.max(0, (System.nanoTime() - startedNanos) / 1_000_000);
+        ToolAuditEvent event = new ToolAuditEvent(
+                java.time.Instant.now(),
+                toolName == null ? "" : toolName,
+                summarizeArguments(arguments),
+                elapsedMillis,
+                result == null ? "" : summarizeResult(result)
+        );
+        synchronized (auditEvents) {
+            auditEvents.add(event);
+            while (auditEvents.size() > MAX_AUDIT_EVENTS) {
+                auditEvents.remove(0);
+            }
+        }
+    }
+
+    private static String summarizeArguments(String arguments) {
+        if (arguments == null || arguments.isBlank()) {
+            return "{}";
+        }
+        try {
+            JsonNode root = mapper.readTree(arguments);
+            if (!root.isObject()) {
+                return truncateForAudit(arguments.trim(), 300);
+            }
+            ObjectNode summary = mapper.createObjectNode();
+            root.fields().forEachRemaining(entry -> {
+                JsonNode value = entry.getValue();
+                if (value != null && value.isTextual() && value.asText().length() > 160) {
+                    summary.put(entry.getKey(), value.asText().substring(0, 160) + "...(" + value.asText().length() + " chars)");
+                } else if (value != null) {
+                    summary.set(entry.getKey(), value);
+                }
+            });
+            return truncateForAudit(summary.toString(), 500);
+        } catch (Exception ignored) {
+            return truncateForAudit(arguments.trim(), 300);
+        }
+    }
+
+    private static String summarizeResult(String result) {
+        return truncateForAudit(result.replace("\n", "\\n"), 500);
+    }
+
+    private static String truncateForAudit(String value, int maxChars) {
+        if (value == null || value.length() <= maxChars) {
+            return value;
+        }
+        return value.substring(0, Math.max(0, maxChars - 3)) + "...";
+    }
+
     public record Tool(String name, String description, JsonNode parameters, ToolMetadata metadata,
                        ToolExecutor executor, JsonToolExecutor jsonExecutor) {
         public Tool(String name, String description, JsonNode parameters, ToolMetadata metadata,
@@ -947,17 +1036,51 @@ public class ToolRegistry {
         }
     }
 
-    public record ToolMetadata(boolean mutatesFile, String pathArgument) {
+    public record ToolMetadata(boolean mutatesFile,
+                               String pathArgument,
+                               boolean requiresApproval,
+                               boolean unknownRisk,
+                               String dangerLevel,
+                               String riskDescription) {
         public static ToolMetadata readOnly() {
-            return new ToolMetadata(false, null);
+            return new ToolMetadata(false, null, false, false, "🟢 安全", "安全的只读操作");
         }
 
         public static ToolMetadata fileMutation(String pathArgument) {
-            return new ToolMetadata(true, pathArgument);
+            return new ToolMetadata(
+                    true,
+                    pathArgument,
+                    true,
+                    false,
+                    "🟡 中危",
+                    "将写入文件内容；覆盖模式可能导致原有内容丢失，追加模式会在文件末尾追加内容"
+            );
+        }
+
+        public static ToolMetadata requiresApproval(String dangerLevel, String riskDescription) {
+            return new ToolMetadata(false, null, true, false, dangerLevel, riskDescription);
+        }
+
+        public static ToolMetadata externalMcpDefault(String serverName) {
+            String server = serverName == null || serverName.isBlank() ? "unknown" : serverName;
+            return new ToolMetadata(
+                    false,
+                    null,
+                    true,
+                    true,
+                    "🟡 MCP",
+                    "将调用 MCP server [" + server + "] 提供的外部工具；该工具未声明风险元数据，默认需要审批"
+            );
         }
     }
 
     public record ToolExecutionResult(String toolCallId, String toolName, String result) {}
+
+    public record ToolAuditEvent(java.time.Instant timestamp,
+                                 String toolName,
+                                 String argumentsSummary,
+                                 long elapsedMillis,
+                                 String resultSummary) {}
 
     private record FileMutationOwner(long toolCallingId, String owner) {}
 

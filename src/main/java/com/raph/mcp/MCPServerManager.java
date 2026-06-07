@@ -106,9 +106,11 @@ public class MCPServerManager implements AutoCloseable {
                     failures.add(failure);
                     continue;
                 }
-                markRunning(config, result.server(), result.tools());
+                markRunning(config, result.server(), result.tools(), result.elapsedMillis());
                 succeeded++;
-                logger.accept("🔌 MCP server 已加载: " + config.name() + " tools=" + result.tools().size());
+                logger.accept("🔌 MCP server 已加载: " + config.name()
+                        + " tools=" + result.tools().size()
+                        + " initMs=" + result.elapsedMillis());
             } catch (CancellationException e) {
                 server.close();
                 String failure = failureWithDiagnostics(config.name(), "初始化已取消", server);
@@ -141,12 +143,13 @@ public class MCPServerManager implements AutoCloseable {
 
     private Callable<ServerInitResult> initTask(MCPServer server) {
         return () -> {
+            long startedNanos = System.nanoTime();
             try {
                 List<ToolRegistry.Tool> tools = server.initializeAndCreateTools();
-                return ServerInitResult.success(server, tools);
+                return ServerInitResult.success(server, tools, elapsedMillis(startedNanos));
             } catch (Exception e) {
                 server.close();
-                return ServerInitResult.failure(server, e.getMessage());
+                return ServerInitResult.failure(server, e.getMessage(), elapsedMillis(startedNanos));
             }
         };
     }
@@ -165,6 +168,9 @@ public class MCPServerManager implements AutoCloseable {
                     .append(" [").append(runtime.status()).append("]")
                     .append(runtime.enabled() ? "" : " disabled")
                     .append(" tools=").append(runtime.toolNames().size());
+            if (runtime.lastInitMillis() > 0) {
+                sb.append(" initMs=").append(runtime.lastInitMillis());
+            }
             if (runtime.lastError() != null && !runtime.lastError().isBlank()) {
                 sb.append(" lastError=").append(runtime.lastError());
             }
@@ -235,8 +241,10 @@ public class MCPServerManager implements AutoCloseable {
                 markFailed(config, server, failure);
                 return "❌ MCP server " + action + "失败: " + failure + "\n";
             }
-            markRunning(config, result.server(), result.tools());
-            return "✅ MCP server " + action + "成功: " + config.name() + " tools=" + result.tools().size() + "\n";
+            markRunning(config, result.server(), result.tools(), result.elapsedMillis());
+            return "✅ MCP server " + action + "成功: " + config.name()
+                    + " tools=" + result.tools().size()
+                    + " initMs=" + result.elapsedMillis() + "\n";
         } catch (java.util.concurrent.TimeoutException e) {
             futureCancel(server);
             String failure = failureWithDiagnostics(config.name(), action + "超时 " + timeoutFor(config).toSeconds() + "s", server);
@@ -264,7 +272,7 @@ public class MCPServerManager implements AutoCloseable {
         }
     }
 
-    private void markRunning(MCPServerConfig config, MCPServer server, List<ToolRegistry.Tool> tools) {
+    private void markRunning(MCPServerConfig config, MCPServer server, List<ToolRegistry.Tool> tools, long elapsedMillis) {
         ServerRuntime runtime = runtimes.computeIfAbsent(config.name(), ignored -> ServerRuntime.initial(config));
         unregisterTools(runtime);
         List<String> toolNames = new ArrayList<>();
@@ -279,6 +287,7 @@ public class MCPServerManager implements AutoCloseable {
         runtime.lastError(null);
         runtime.diagnostics(server == null ? "" : server.diagnostics());
         runtime.logs(server == null ? "" : server.logs());
+        runtime.lastInitMillis(elapsedMillis);
     }
 
     private void markFailed(MCPServerConfig config, MCPServer server, String failure) {
@@ -363,6 +372,10 @@ public class MCPServerManager implements AutoCloseable {
         return current.getMessage();
     }
 
+    private static long elapsedMillis(long startedNanos) {
+        return Math.max(0, (System.nanoTime() - startedNanos) / 1_000_000);
+    }
+
     private static String failureWithDiagnostics(String serverName, String message, MCPServer server) {
         String diagnostics = server == null ? "" : server.diagnostics();
         String normalizedMessage = message == null || message.isBlank() ? "unknown error" : message;
@@ -388,13 +401,13 @@ public class MCPServerManager implements AutoCloseable {
 
     public record InitSummary(int succeeded, int failed, List<String> failures) {}
 
-    private record ServerInitResult(MCPServer server, List<ToolRegistry.Tool> tools, String errorMessage) {
-        static ServerInitResult success(MCPServer server, List<ToolRegistry.Tool> tools) {
-            return new ServerInitResult(server, tools == null ? List.of() : List.copyOf(tools), null);
+    private record ServerInitResult(MCPServer server, List<ToolRegistry.Tool> tools, String errorMessage, long elapsedMillis) {
+        static ServerInitResult success(MCPServer server, List<ToolRegistry.Tool> tools, long elapsedMillis) {
+            return new ServerInitResult(server, tools == null ? List.of() : List.copyOf(tools), null, elapsedMillis);
         }
 
-        static ServerInitResult failure(MCPServer server, String errorMessage) {
-            return new ServerInitResult(server, List.of(), errorMessage == null ? "unknown error" : errorMessage);
+        static ServerInitResult failure(MCPServer server, String errorMessage, long elapsedMillis) {
+            return new ServerInitResult(server, List.of(), errorMessage == null ? "unknown error" : errorMessage, elapsedMillis);
         }
     }
 
@@ -414,6 +427,7 @@ public class MCPServerManager implements AutoCloseable {
         private String lastError;
         private String diagnostics = "";
         private String logs = "";
+        private long lastInitMillis;
 
         private ServerRuntime(MCPServerConfig config) {
             this.config = config;
@@ -481,6 +495,14 @@ public class MCPServerManager implements AutoCloseable {
 
         void logs(String logs) {
             this.logs = logs == null ? "" : logs;
+        }
+
+        long lastInitMillis() {
+            return lastInitMillis;
+        }
+
+        void lastInitMillis(long lastInitMillis) {
+            this.lastInitMillis = Math.max(0, lastInitMillis);
         }
     }
 }

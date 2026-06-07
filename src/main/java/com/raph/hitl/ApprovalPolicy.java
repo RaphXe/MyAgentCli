@@ -1,5 +1,7 @@
 package com.raph.hitl;
 
+import com.raph.tool.ToolRegistry;
+
 import java.util.Set;
 
 /**
@@ -19,12 +21,26 @@ public final class ApprovalPolicy {
         return DANGEROUS_TOOLS.contains(toolName) || isMcpTool(toolName);
     }
 
+    public static boolean requiresApproval(String toolName, ToolRegistry.ToolMetadata metadata) {
+        if (metadata != null) {
+            return metadata.requiresApproval();
+        }
+        return requiresApproval(toolName);
+    }
+
     public static String getDangerLevel(String toolName) {
         return switch (toolName) {
             case "execute_command" -> "🔴 高危";
             case "write_file", "create_project" -> "🟡 中危";
             default -> isMcpTool(toolName) ? "🟡 MCP" : "🟢 安全";
         };
+    }
+
+    public static String getDangerLevel(String toolName, ToolRegistry.ToolMetadata metadata) {
+        if (metadata != null && metadata.dangerLevel() != null && !metadata.dangerLevel().isBlank()) {
+            return metadata.dangerLevel();
+        }
+        return getDangerLevel(toolName);
     }
 
     public static String getRiskDescription(String toolName) {
@@ -36,6 +52,13 @@ public final class ApprovalPolicy {
                     ? "将调用外部 MCP server 提供的工具，可能访问网络、文件或第三方服务"
                     : "安全的只读操作";
         };
+    }
+
+    public static String getRiskDescription(String toolName, ToolRegistry.ToolMetadata metadata) {
+        if (metadata != null && metadata.riskDescription() != null && !metadata.riskDescription().isBlank()) {
+            return metadata.riskDescription();
+        }
+        return getRiskDescription(toolName);
     }
 
     public static Set<String> getDangerousTools() {
