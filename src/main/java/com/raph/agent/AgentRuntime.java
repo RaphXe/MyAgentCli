@@ -3,6 +3,8 @@ package com.raph.agent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.raph.llm.LlmClient;
+import com.raph.memory.ContextUsage;
+import com.raph.memory.ContextWindowConfig;
 import com.raph.tool.ToolRegistry;
 import com.raph.render.PlainRenderer;
 import com.raph.render.Renderer;
@@ -39,6 +41,7 @@ public class AgentRuntime {
     private final TaskBoard taskBoard = new TaskBoard();
     private final Map<String, TeamAgent> agents = new LinkedHashMap<>();
     private final int maxRounds;
+    private final int maxContextTokens;
     private final Renderer renderer;
     private String finalAnswer;
 
@@ -66,6 +69,7 @@ public class AgentRuntime {
         this.client = client;
         this.toolRegistry = toolRegistry;
         this.maxRounds = maxRounds <= 0 ? DEFAULT_MAX_ROUNDS : maxRounds;
+        this.maxContextTokens = ContextWindowConfig.loadMaxContextTokens();
         this.renderer = renderer == null ? new PlainRenderer(System.out) : renderer;
         registerDefaultTeam();
     }
@@ -140,6 +144,24 @@ public class AgentRuntime {
         }
         logLine(log, "✅ 团队输出：\n" + finalAnswer);
         return "✅ Multi-Agent 自治调度结束。";
+    }
+
+    public ContextUsage currentContextUsage() {
+        TeamAgent peak = null;
+        int peakTokens = 0;
+        int totalTokens = 0;
+        for (TeamAgent agent : agents.values()) {
+            int tokens = agent.getContextTokens();
+            totalTokens += tokens;
+            if (tokens > peakTokens) {
+                peakTokens = tokens;
+                peak = agent;
+            }
+        }
+
+        String peakLabel = peak == null ? "none" : peak.id() + "/" + peak.role();
+        String details = "peak=" + peakLabel + ", agents=" + agents.size() + ", total=" + totalTokens;
+        return new ContextUsage("团队模式", peakTokens, maxContextTokens, details);
     }
 
     private AgentDecision callAgentWithHeartbeat(TeamAgent agent, RuntimeView view,

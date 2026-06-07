@@ -6,6 +6,8 @@ import com.raph.plan.Planner;
 import com.raph.plan.Task;
 import com.raph.tool.ToolRegistry;
 import com.raph.render.Renderer;
+import com.raph.memory.ContextUsage;
+import com.raph.memory.ContextWindowConfig;
 
 import java.io.IOException;
 import java.util.*;
@@ -15,6 +17,9 @@ public class PlanExecuteAgent {
     private final ToolRegistry toolRegistry;
     private final Planner planner;
     private final int outputTruncateLimit;
+    private final int maxContextTokens;
+    private int lastContextTokens;
+    private int lastOutputTokens;
 
     private static final int MAX_TOOL_ITERATIONS = 8;
 
@@ -23,10 +28,14 @@ public class PlanExecuteAgent {
         this.toolRegistry = toolRegistry;
         this.planner = new Planner(client);
         this.outputTruncateLimit = outputTruncateLimit;
+        this.maxContextTokens = ContextWindowConfig.loadMaxContextTokens();
     }
 
     public ExecutionPlan createPlan(String userInput) throws IOException {
-        return planner.createPlan(userInput);
+        ExecutionPlan plan = planner.createPlan(userInput);
+        lastContextTokens = planner.getLastInputTokens();
+        lastOutputTokens = planner.getLastOutputTokens();
+        return plan;
     }
 
     public String run(String userInput) {
@@ -178,6 +187,8 @@ public class PlanExecuteAgent {
                     toolRegistry.getToolDefinitions(),
                     streamHandle == null ? LlmClient.StreamListener.NO_OP : streamHandle
             );
+            lastContextTokens = response.inputTokens();
+            lastOutputTokens = response.outputTokens();
 
             if (response.hasToolCalls()) {
                 if (streamHandle != null) {
@@ -207,6 +218,11 @@ public class PlanExecuteAgent {
         }
 
         return finalResult.toString();
+    }
+
+    public ContextUsage currentContextUsage() {
+        return new ContextUsage("计划模式", lastContextTokens, maxContextTokens,
+                "lastOutput=" + lastOutputTokens);
     }
 
     /**

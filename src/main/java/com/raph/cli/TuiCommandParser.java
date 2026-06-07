@@ -1,0 +1,34 @@
+package com.raph.cli;
+
+import java.util.Locale;
+
+public final class TuiCommandParser {
+    private TuiCommandParser() {
+    }
+
+    public static TuiCommand parse(String input) {
+        String trimmed = input == null ? "" : input.trim();
+        if (trimmed.isEmpty()) {
+            return new TuiCommand(TuiCommand.Type.USER_INPUT, "", trimmed);
+        }
+        if (!trimmed.startsWith("/")) {
+            return new TuiCommand(TuiCommand.Type.USER_INPUT, trimmed, trimmed);
+        }
+
+        int separator = trimmed.indexOf(' ');
+        String commandName = separator < 0 ? trimmed : trimmed.substring(0, separator);
+        String arguments = separator < 0 ? "" : trimmed.substring(separator + 1).trim();
+
+        TuiCommand.Type type = switch (commandName.toLowerCase(Locale.ROOT)) {
+            case "/plan" -> TuiCommand.Type.PLAN;
+            case "/team" -> TuiCommand.Type.TEAM;
+            case "/hitl" -> TuiCommand.Type.HITL;
+            case "/save" -> TuiCommand.Type.SAVE;
+            case "/clear" -> TuiCommand.Type.CLEAR;
+            case "/exit" -> TuiCommand.Type.EXIT;
+            default -> TuiCommand.Type.UNKNOWN;
+        };
+
+        return new TuiCommand(type, arguments, trimmed);
+    }
+}

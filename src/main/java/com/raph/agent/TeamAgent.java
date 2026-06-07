@@ -20,6 +20,8 @@ public class TeamAgent {
     private final LlmClient client;
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> history = new ArrayList<>();
+    private int lastInputTokens;
+    private int lastOutputTokens;
 
     public TeamAgent(String id, AgentRole role, LlmClient client, ToolRegistry toolRegistry) {
         this.id = id;
@@ -60,6 +62,8 @@ public class TeamAgent {
                     toolsForRole(),
                     streamListener
             );
+            lastInputTokens = response.inputTokens();
+            lastOutputTokens = response.outputTokens();
             if (response.hasToolCalls()) {
                 stepObserver.onEvent("tool-iteration#" + iteration + " calls=" + summarizeToolCalls(response.toolCalls()));
                 history.add(LlmClient.Message.assistant(response.content(), response.toolCalls()));
@@ -74,6 +78,14 @@ public class TeamAgent {
         }
 
         return AgentDecision.fallback("达到工具调用轮数上限(" + maxToolIterations() + ")，已暂停并等待下一轮。 ");
+    }
+
+    public int getContextTokens() {
+        return lastInputTokens;
+    }
+
+    public int getLastOutputTokens() {
+        return lastOutputTokens;
     }
 
     private int maxToolIterations() {

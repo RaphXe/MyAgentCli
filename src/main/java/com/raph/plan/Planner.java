@@ -14,6 +14,8 @@ import com.raph.llm.LlmClient.Message;
 public class Planner {
     private final LlmClient client;
     private final ObjectMapper mapper = new ObjectMapper();
+    private int lastInputTokens;
+    private int lastOutputTokens;
 
     public Planner(LlmClient client) {
         this.client = client;
@@ -159,6 +161,8 @@ public class Planner {
     }
 
     public ExecutionPlan createPlan(String userInput) throws IOException {
+        lastInputTokens = 0;
+        lastOutputTokens = 0;
 
         if (isConversationalQuestion(userInput)) {
             System.out.println("💬 对话性问题，直接回答");
@@ -176,9 +180,19 @@ public class Planner {
                 Message.user("请为以下任务制定执行计划: \n" + userInput));
 
         LlmClient.ChatResponse response = client.chat(messages, null);
+        lastInputTokens = response.inputTokens();
+        lastOutputTokens = response.outputTokens();
         String planJson = response.getContent();
 
         return parsePlan(userInput, planJson);
+    }
+
+    public int getLastInputTokens() {
+        return lastInputTokens;
+    }
+
+    public int getLastOutputTokens() {
+        return lastOutputTokens;
     }
 
     private boolean isConversationalQuestion(String goal) {

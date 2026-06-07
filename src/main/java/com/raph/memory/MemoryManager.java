@@ -22,7 +22,7 @@ public class MemoryManager {
         this.llmClient = llmClient;
         this.longTermHistory = new LongTermHistory();
         this.memoryRetriever = new MemoryRetriever();
-        this.tokenBudget = new TokenBudget(loadMaxContextTokens());
+        this.tokenBudget = new TokenBudget(ContextWindowConfig.loadMaxContextTokens());
         this.contextCompressor = new ContextCompressor();
     }
 
@@ -115,14 +115,4 @@ public class MemoryManager {
         return text == null ? 0 : (int) Math.ceil(text.length() / 3.5);
     }
 
-    private static int loadMaxContextTokens() {
-        String value = System.getenv("CONTEXT_WINDOW_SIZE");
-        if (value != null && !value.isBlank()) {
-            try {
-                int v = Integer.parseInt(value.trim());
-                if (v > 0) return v;
-            } catch (NumberFormatException ignored) {}
-        }
-        return 1_048_576;
-    }
 }

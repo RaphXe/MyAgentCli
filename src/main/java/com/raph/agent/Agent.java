@@ -3,6 +3,7 @@ package com.raph.agent;
 import com.raph.llm.DeepSeekClient;
 import com.raph.llm.LlmClient;
 import com.raph.llm.LlmClient.*;
+import com.raph.memory.ContextWindowConfig;
 import com.raph.memory.MemoryManager;
 import com.raph.tool.ToolRegistry;
 
@@ -167,13 +168,6 @@ public class Agent {
     }
 
     private static int loadMaxContextTokens() {
-        String value = System.getenv("CONTEXT_WINDOW_SIZE");
-        if (value != null && !value.isBlank()) {
-            try {
-                int v = Integer.parseInt(value.trim());
-                if (v > 0) return v;
-            } catch (NumberFormatException ignored) {}
-        }
-        return 1_048_576;
+        return ContextWindowConfig.loadMaxContextTokens();
     }
 }
