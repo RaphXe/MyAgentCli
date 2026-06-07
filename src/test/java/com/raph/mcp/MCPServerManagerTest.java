@@ -108,6 +108,51 @@ class MCPServerManagerTest {
         manager.close();
     }
 
+    @Test
+    void disableRemovesToolsAndEnableRegistersThemAgain() {
+        ToolRegistry registry = new ToolRegistry();
+        MCPServerManager manager = new FakeManager(
+                List.of(config("one")),
+                registry,
+                ignored -> {},
+                0,
+                false
+        );
+
+        manager.startAllAndRegisterTools();
+        assertTrue(registry.hasTool("mcp__one__echo"));
+
+        String disabled = manager.disable("one");
+        assertTrue(disabled.contains("已禁用"), disabled);
+        assertTrue(!registry.hasTool("mcp__one__echo"));
+        assertTrue(manager.statusReport().contains("DISABLED"));
+
+        String enabled = manager.enable("one");
+        assertTrue(enabled.contains("成功"), enabled);
+        assertTrue(registry.hasTool("mcp__one__echo"));
+        assertTrue(manager.statusReport().contains("RUNNING"));
+        manager.close();
+    }
+
+    @Test
+    void restartRemovesOldToolsAndRegistersFreshTools() {
+        ToolRegistry registry = new ToolRegistry();
+        MCPServerManager manager = new VersionedToolManager(
+                List.of(config("one")),
+                registry,
+                ignored -> {}
+        );
+
+        manager.startAllAndRegisterTools();
+        assertTrue(registry.hasTool("mcp__one__echo_1"));
+
+        String restarted = manager.restart("one");
+        assertTrue(restarted.contains("成功"), restarted);
+        assertTrue(!registry.hasTool("mcp__one__echo_1"));
+        assertTrue(registry.hasTool("mcp__one__echo_2"));
+        manager.close();
+    }
+
     private static MCPServerConfig config(String name) {
         return new MCPServerConfig(name, "stdio", "unused", List.of(), Map.of(), null, Map.of(), null);
     }
@@ -213,6 +258,45 @@ class MCPServerManagerTest {
         @Override
         public String diagnostics() {
             return "diagnostics=slow-server";
+        }
+    }
+
+    private static final class VersionedToolManager extends MCPServerManager {
+        private final AtomicInteger version = new AtomicInteger();
+
+        private VersionedToolManager(List<MCPServerConfig> configs, ToolRegistry registry,
+                                     java.util.function.Consumer<String> logger) {
+            super(configs, registry, logger);
+        }
+
+        @Override
+        protected MCPServer createServer(MCPServerConfig config) {
+            return new VersionedToolServer(config, version.incrementAndGet());
+        }
+    }
+
+    private static final class VersionedToolServer extends MCPServer {
+        private final MCPServerConfig config;
+        private final int version;
+
+        private VersionedToolServer(MCPServerConfig config, int version) {
+            super(config);
+            this.config = config;
+            this.version = version;
+        }
+
+        @Override
+        public List<ToolRegistry.Tool> initializeAndCreateTools() {
+            ObjectNode schema = MAPPER.createObjectNode();
+            schema.put("type", "object");
+            schema.set("properties", MAPPER.createObjectNode());
+            return List.of(new ToolRegistry.Tool(
+                    "mcp__" + config.name() + "__echo_" + version,
+                    "fake",
+                    schema,
+                    ToolRegistry.ToolMetadata.readOnly(),
+                    args -> "ok"
+            ));
         }
     }
 }

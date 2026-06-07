@@ -64,7 +64,8 @@ public class Main {
         }
 
         try {
-            new TuiSession(reader, renderer, llmClient, toolRegistry, hitlHandler, memoryManager, agent, planAgent).run();
+            new TuiSession(reader, renderer, llmClient, toolRegistry, hitlHandler,
+                    memoryManager, mcpServerManager, agent, planAgent).run();
         } finally {
             mcpServerManager.close();
         }

@@ -213,6 +213,12 @@ public class StdioMCPTransport implements MCPTransport {
                 + ", stderr=" + (stderr.isBlank() ? "(empty)" : stderr);
     }
 
+    @Override
+    public String logs() {
+        String stderr = recentStderr();
+        return stderr.isBlank() ? "(empty)" : stderr;
+    }
+
     private static String blankToDefault(String value, String defaultValue) {
         return value == null || value.isBlank() ? defaultValue : value;
     }

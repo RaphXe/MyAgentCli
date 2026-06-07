@@ -6,7 +6,9 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
@@ -26,7 +28,8 @@ public class MCPServerManager implements AutoCloseable {
     private final Consumer<String> logger;
     private final int initConcurrency;
     private final Duration initTimeout;
-    private final List<MCPServer> runningServers = new ArrayList<>();
+    private final Map<String, MCPServerConfig> configByName = new LinkedHashMap<>();
+    private final Map<String, ServerRuntime> runtimes = new LinkedHashMap<>();
     private ExecutorService executor;
 
     public MCPServerManager(List<MCPServerConfig> configs, ToolRegistry toolRegistry, Consumer<String> logger) {
@@ -36,6 +39,10 @@ public class MCPServerManager implements AutoCloseable {
         this.initConcurrency = Math.max(1, readIntProperty("paicli.mcp.init.concurrency", DEFAULT_INIT_CONCURRENCY));
         this.initTimeout = Duration.ofSeconds(Math.max(1,
                 readIntProperty("paicli.mcp.init.timeout.seconds", DEFAULT_INIT_TIMEOUT_SECONDS)));
+        for (MCPServerConfig config : this.configs) {
+            configByName.put(config.name(), config);
+            runtimes.put(config.name(), ServerRuntime.initial(config));
+        }
     }
 
     public static MCPServerManager fromDefaultConfig(ToolRegistry toolRegistry, Consumer<String> logger) {
@@ -86,32 +93,38 @@ public class MCPServerManager implements AutoCloseable {
             MCPServer server = servers.get(i);
             try {
                 if (future.isCancelled()) {
-                    server.close();
-                    failures.add(failureWithDiagnostics(config.name(),
-                            "初始化超时 " + timeoutFor(config).toSeconds() + "s", server));
+                    String failure = failureWithDiagnostics(config.name(),
+                            "初始化超时 " + timeoutFor(config).toSeconds() + "s", server);
+                    markFailed(config, server, failure);
+                    failures.add(failure);
                     continue;
                 }
                 ServerInitResult result = future.get();
                 if (result.errorMessage() != null) {
-                    failures.add(failureWithDiagnostics(config.name(), result.errorMessage(), server));
+                    String failure = failureWithDiagnostics(config.name(), result.errorMessage(), server);
+                    markFailed(config, server, failure);
+                    failures.add(failure);
                     continue;
                 }
-                runningServers.add(result.server());
-                for (ToolRegistry.Tool tool : result.tools()) {
-                    toolRegistry.registerTool(tool);
-                }
+                markRunning(config, result.server(), result.tools());
                 succeeded++;
                 logger.accept("🔌 MCP server 已加载: " + config.name() + " tools=" + result.tools().size());
             } catch (CancellationException e) {
                 server.close();
-                failures.add(failureWithDiagnostics(config.name(), "初始化已取消", server));
+                String failure = failureWithDiagnostics(config.name(), "初始化已取消", server);
+                markFailed(config, server, failure);
+                failures.add(failure);
             } catch (ExecutionException e) {
                 server.close();
-                failures.add(failureWithDiagnostics(config.name(), rootMessage(e), server));
+                String failure = failureWithDiagnostics(config.name(), rootMessage(e), server);
+                markFailed(config, server, failure);
+                failures.add(failure);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 server.close();
-                failures.add(failureWithDiagnostics(config.name(), "初始化被中断", server));
+                String failure = failureWithDiagnostics(config.name(), "初始化被中断", server);
+                markFailed(config, server, failure);
+                failures.add(failure);
             }
         }
 
@@ -140,6 +153,177 @@ public class MCPServerManager implements AutoCloseable {
 
     protected MCPServer createServer(MCPServerConfig config) {
         return new MCPServer(config);
+    }
+
+    public synchronized String statusReport() {
+        if (runtimes.isEmpty()) {
+            return "MCP servers: (none)\n";
+        }
+        StringBuilder sb = new StringBuilder("MCP servers:\n");
+        for (ServerRuntime runtime : runtimes.values()) {
+            sb.append("- ").append(runtime.config().name())
+                    .append(" [").append(runtime.status()).append("]")
+                    .append(runtime.enabled() ? "" : " disabled")
+                    .append(" tools=").append(runtime.toolNames().size());
+            if (runtime.lastError() != null && !runtime.lastError().isBlank()) {
+                sb.append(" lastError=").append(runtime.lastError());
+            }
+            sb.append("\n");
+        }
+        return sb.toString();
+    }
+
+    public synchronized String restart(String name) {
+        ServerRuntime runtime = runtimeFor(name);
+        if (runtime == null) {
+            return unknownServer(name);
+        }
+        if (!runtime.enabled()) {
+            return "MCP server 已禁用: " + runtime.config().name() + "，请先使用 /mcp enable "
+                    + runtime.config().name() + "\n";
+        }
+        stopRuntime(runtime, ServerStatus.STOPPED, "restart requested");
+        return startOne(runtime.config(), "重启");
+    }
+
+    public synchronized String disable(String name) {
+        ServerRuntime runtime = runtimeFor(name);
+        if (runtime == null) {
+            return unknownServer(name);
+        }
+        stopRuntime(runtime, ServerStatus.DISABLED, "disabled by user");
+        runtime.enabled(false);
+        return "MCP server 已禁用: " + runtime.config().name() + "\n";
+    }
+
+    public synchronized String enable(String name) {
+        ServerRuntime runtime = runtimeFor(name);
+        if (runtime == null) {
+            return unknownServer(name);
+        }
+        runtime.enabled(true);
+        if (runtime.status() == ServerStatus.RUNNING) {
+            return "MCP server 已经运行: " + runtime.config().name() + "\n";
+        }
+        return startOne(runtime.config(), "启用");
+    }
+
+    public synchronized String logs(String name) {
+        ServerRuntime runtime = runtimeFor(name);
+        if (runtime == null) {
+            return unknownServer(name);
+        }
+        String logs = runtime.server() == null ? runtime.logs() : runtime.server().logs();
+        if (logs == null || logs.isBlank()) {
+            logs = "(empty)";
+        }
+        return "MCP logs [" + runtime.config().name() + "]:\n" + logs + "\n";
+    }
+
+    private String startOne(MCPServerConfig config, String action) {
+        MCPServer server = createServer(config);
+        ExecutorService single = Executors.newSingleThreadExecutor(r -> {
+            Thread thread = new Thread(r, "mcp-" + action + "-" + config.name());
+            thread.setDaemon(true);
+            return thread;
+        });
+        try {
+            Future<ServerInitResult> future = single.submit(initTask(server));
+            ServerInitResult result = future.get(timeoutFor(config).toSeconds(), TimeUnit.SECONDS);
+            if (result.errorMessage() != null) {
+                String failure = failureWithDiagnostics(config.name(), result.errorMessage(), server);
+                markFailed(config, server, failure);
+                return "❌ MCP server " + action + "失败: " + failure + "\n";
+            }
+            markRunning(config, result.server(), result.tools());
+            return "✅ MCP server " + action + "成功: " + config.name() + " tools=" + result.tools().size() + "\n";
+        } catch (java.util.concurrent.TimeoutException e) {
+            futureCancel(server);
+            String failure = failureWithDiagnostics(config.name(), action + "超时 " + timeoutFor(config).toSeconds() + "s", server);
+            markFailed(config, server, failure);
+            return "❌ MCP server " + action + "失败: " + failure + "\n";
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            futureCancel(server);
+            String failure = failureWithDiagnostics(config.name(), action + "被中断", server);
+            markFailed(config, server, failure);
+            return "❌ MCP server " + action + "失败: " + failure + "\n";
+        } catch (ExecutionException e) {
+            futureCancel(server);
+            String failure = failureWithDiagnostics(config.name(), rootMessage(e), server);
+            markFailed(config, server, failure);
+            return "❌ MCP server " + action + "失败: " + failure + "\n";
+        } finally {
+            single.shutdownNow();
+        }
+    }
+
+    private void futureCancel(MCPServer server) {
+        if (server != null) {
+            server.close();
+        }
+    }
+
+    private void markRunning(MCPServerConfig config, MCPServer server, List<ToolRegistry.Tool> tools) {
+        ServerRuntime runtime = runtimes.computeIfAbsent(config.name(), ignored -> ServerRuntime.initial(config));
+        unregisterTools(runtime);
+        List<String> toolNames = new ArrayList<>();
+        for (ToolRegistry.Tool tool : tools == null ? List.<ToolRegistry.Tool>of() : tools) {
+            toolRegistry.registerTool(tool);
+            toolNames.add(tool.name());
+        }
+        runtime.server(server);
+        runtime.toolNames(List.copyOf(toolNames));
+        runtime.status(ServerStatus.RUNNING);
+        runtime.enabled(true);
+        runtime.lastError(null);
+        runtime.diagnostics(server == null ? "" : server.diagnostics());
+        runtime.logs(server == null ? "" : server.logs());
+    }
+
+    private void markFailed(MCPServerConfig config, MCPServer server, String failure) {
+        ServerRuntime runtime = runtimes.computeIfAbsent(config.name(), ignored -> ServerRuntime.initial(config));
+        unregisterTools(runtime);
+        runtime.server(null);
+        runtime.toolNames(List.of());
+        runtime.status(runtime.enabled() ? ServerStatus.FAILED : ServerStatus.DISABLED);
+        runtime.lastError(failure);
+        runtime.diagnostics(server == null ? "" : server.diagnostics());
+        runtime.logs(server == null ? "" : server.logs());
+        if (server != null) {
+            server.close();
+        }
+    }
+
+    private void stopRuntime(ServerRuntime runtime, ServerStatus status, String reason) {
+        unregisterTools(runtime);
+        if (runtime.server() != null) {
+            runtime.diagnostics(runtime.server().diagnostics());
+            runtime.logs(runtime.server().logs());
+            runtime.server().close();
+        }
+        runtime.server(null);
+        runtime.toolNames(List.of());
+        runtime.status(status);
+        runtime.lastError(reason);
+    }
+
+    private void unregisterTools(ServerRuntime runtime) {
+        for (String toolName : runtime.toolNames()) {
+            toolRegistry.unregisterTool(toolName);
+        }
+    }
+
+    private ServerRuntime runtimeFor(String name) {
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        return runtimes.get(name.trim());
+    }
+
+    private String unknownServer(String name) {
+        return "❌ 未找到 MCP server: " + (name == null || name.isBlank() ? "(empty)" : name)
+                + "\n可用 server: " + String.join(", ", configByName.keySet()) + "\n";
     }
 
     private long maxInitTimeoutSeconds() {
@@ -193,10 +377,13 @@ public class MCPServerManager implements AutoCloseable {
         if (executor != null) {
             executor.shutdownNow();
         }
-        for (MCPServer server : runningServers) {
-            server.close();
+        for (ServerRuntime runtime : runtimes.values()) {
+            if (runtime.server() != null) {
+                runtime.server().close();
+                runtime.server(null);
+                runtime.status(runtime.enabled() ? ServerStatus.STOPPED : ServerStatus.DISABLED);
+            }
         }
-        runningServers.clear();
     }
 
     public record InitSummary(int succeeded, int failed, List<String> failures) {}
@@ -208,6 +395,92 @@ public class MCPServerManager implements AutoCloseable {
 
         static ServerInitResult failure(MCPServer server, String errorMessage) {
             return new ServerInitResult(server, List.of(), errorMessage == null ? "unknown error" : errorMessage);
+        }
+    }
+
+    public enum ServerStatus {
+        STOPPED,
+        RUNNING,
+        FAILED,
+        DISABLED
+    }
+
+    private static final class ServerRuntime {
+        private final MCPServerConfig config;
+        private boolean enabled = true;
+        private ServerStatus status = ServerStatus.STOPPED;
+        private MCPServer server;
+        private List<String> toolNames = List.of();
+        private String lastError;
+        private String diagnostics = "";
+        private String logs = "";
+
+        private ServerRuntime(MCPServerConfig config) {
+            this.config = config;
+        }
+
+        static ServerRuntime initial(MCPServerConfig config) {
+            return new ServerRuntime(config);
+        }
+
+        MCPServerConfig config() {
+            return config;
+        }
+
+        boolean enabled() {
+            return enabled;
+        }
+
+        void enabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        ServerStatus status() {
+            return status;
+        }
+
+        void status(ServerStatus status) {
+            this.status = status;
+        }
+
+        MCPServer server() {
+            return server;
+        }
+
+        void server(MCPServer server) {
+            this.server = server;
+        }
+
+        List<String> toolNames() {
+            return toolNames;
+        }
+
+        void toolNames(List<String> toolNames) {
+            this.toolNames = toolNames == null ? List.of() : List.copyOf(toolNames);
+        }
+
+        String lastError() {
+            return lastError;
+        }
+
+        void lastError(String lastError) {
+            this.lastError = lastError;
+        }
+
+        String diagnostics() {
+            return diagnostics;
+        }
+
+        void diagnostics(String diagnostics) {
+            this.diagnostics = diagnostics == null ? "" : diagnostics;
+        }
+
+        String logs() {
+            return logs;
+        }
+
+        void logs(String logs) {
+            this.logs = logs == null ? "" : logs;
         }
     }
 }

@@ -13,6 +13,10 @@ public interface MCPTransport extends AutoCloseable {
         return "";
     }
 
+    default String logs() {
+        return diagnostics();
+    }
+
     @Override
     void close();
 }

@@ -59,6 +59,12 @@ public class ToolRegistry {
         return name != null && tools.containsKey(name);
     }
 
+    public synchronized void unregisterTool(String name) {
+        if (name != null && !name.isBlank()) {
+            tools.remove(name);
+        }
+    }
+
     private void registerFileTools () {
         // read_file 工具
         tools.put("read_file", new Tool(

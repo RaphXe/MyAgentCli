@@ -62,6 +62,10 @@ public class JsonRPCClient implements AutoCloseable {
         return transport.diagnostics();
     }
 
+    public String logs() {
+        return transport.logs();
+    }
+
     @Override
     public void close() {
         transport.close();

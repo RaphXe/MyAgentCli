@@ -7,6 +7,7 @@ import com.raph.hitl.TerminalHitlHandler;
 import com.raph.llm.LlmClient;
 import com.raph.memory.ContextUsage;
 import com.raph.memory.MemoryManager;
+import com.raph.mcp.MCPServerManager;
 import com.raph.plan.ExecutionPlan;
 import com.raph.render.Renderer;
 import com.raph.tool.ToolRegistry;
@@ -23,6 +24,7 @@ public class TuiSession {
     private final ToolRegistry toolRegistry;
     private final TerminalHitlHandler hitlHandler;
     private final MemoryManager memoryManager;
+    private final MCPServerManager mcpServerManager;
     private final Agent agent;
     private final PlanExecuteAgent planAgent;
     private AgentRuntime teamRuntime;
@@ -35,6 +37,7 @@ public class TuiSession {
                       ToolRegistry toolRegistry,
                       TerminalHitlHandler hitlHandler,
                       MemoryManager memoryManager,
+                      MCPServerManager mcpServerManager,
                       Agent agent,
                       PlanExecuteAgent planAgent) {
         this.reader = reader;
@@ -43,12 +46,13 @@ public class TuiSession {
         this.toolRegistry = toolRegistry;
         this.hitlHandler = hitlHandler;
         this.memoryManager = memoryManager;
+        this.mcpServerManager = mcpServerManager;
         this.agent = agent;
         this.planAgent = planAgent;
     }
 
     public void run() {
-        renderer.println("💡 提示: 输入 '/plan' 切换计划模式, '/team' 切换团队模式, '/hitl on|off' 切换人工审批, '/save <描述>' 保存记忆, '/clear' 清空历史, '/exit' 退出或返回普通模式\n");
+        renderer.println("💡 提示: 输入 '/plan' 切换计划模式, '/team' 切换团队模式, '/mcp' 查看 MCP, '/hitl on|off' 切换人工审批, '/save <描述>' 保存记忆, '/clear' 清空历史, '/exit' 退出或返回普通模式\n");
 
         while (true) {
             renderer.print(TuiStatusLine.contextBar(currentContextUsage()));
@@ -79,6 +83,7 @@ public class TuiSession {
         switch (command.type()) {
             case PLAN -> switchMode(SessionMode.PLAN, "🧠 当前处于计划模式，输入任务目标后我将制定执行计划");
             case TEAM -> handleTeamCommand(command);
+            case MCP -> handleMcpCommand(command.arguments());
             case HITL -> handleHitlCommand(command.arguments());
             case SAVE -> saveMemory(command.arguments());
             case CLEAR -> clearHistory();
@@ -86,6 +91,55 @@ public class TuiSession {
             case UNKNOWN -> renderer.println("❌ 未知命令: " + command.rawInput() + "\n");
             case USER_INPUT -> {
             }
+        }
+    }
+
+    private void handleMcpCommand(String arguments) {
+        String args = arguments == null ? "" : arguments.trim();
+        if (args.isEmpty()) {
+            renderer.println(mcpServerManager.statusReport());
+            return;
+        }
+        String[] parts = args.split("\\s+", 2);
+        String action = parts[0].toLowerCase(java.util.Locale.ROOT);
+        String name = parts.length > 1 ? parts[1].trim() : "";
+        switch (action) {
+            case "restart" -> {
+                if (name.isEmpty()) {
+                    renderer.println("❌ 用法: /mcp restart <name>\n");
+                } else {
+                    renderer.println(mcpServerManager.restart(name));
+                }
+            }
+            case "logs" -> {
+                if (name.isEmpty()) {
+                    renderer.println("❌ 用法: /mcp logs <name>\n");
+                } else {
+                    renderer.println(mcpServerManager.logs(name));
+                }
+            }
+            case "disable" -> {
+                if (name.isEmpty()) {
+                    renderer.println("❌ 用法: /mcp disable <name>\n");
+                } else {
+                    renderer.println(mcpServerManager.disable(name));
+                }
+            }
+            case "enable" -> {
+                if (name.isEmpty()) {
+                    renderer.println("❌ 用法: /mcp enable <name>\n");
+                } else {
+                    renderer.println(mcpServerManager.enable(name));
+                }
+            }
+            default -> renderer.println("""
+                    ❌ 用法:
+                    /mcp
+                    /mcp restart <name>
+                    /mcp logs <name>
+                    /mcp disable <name>
+                    /mcp enable <name>
+                    """);
         }
     }
 

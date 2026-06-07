@@ -22,6 +22,14 @@ class TuiCommandParserTest {
     }
 
     @Test
+    void mcpCommandParsesSubcommandsAsArguments() {
+        TuiCommand command = TuiCommandParser.parse("/mcp restart everything");
+
+        assertEquals(TuiCommand.Type.MCP, command.type());
+        assertEquals("restart everything", command.arguments());
+    }
+
+    @Test
     void renamedClearAndExitCommandsRequireSlash() {
         assertEquals(TuiCommand.Type.CLEAR, TuiCommandParser.parse("/clear").type());
         assertEquals(TuiCommand.Type.EXIT, TuiCommandParser.parse("/exit").type());

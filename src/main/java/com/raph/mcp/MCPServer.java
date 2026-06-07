@@ -36,6 +36,10 @@ public class MCPServer implements AutoCloseable {
         return client.diagnostics();
     }
 
+    public String logs() {
+        return client.logs();
+    }
+
     public List<ToolRegistry.Tool> initializeAndCreateTools() throws MCPException {
         client.start();
         initialize();
