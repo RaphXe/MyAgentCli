@@ -13,7 +13,9 @@ import com.raph.render.Renderer;
 import com.raph.skill.Skill;
 import com.raph.skill.SkillRepository;
 import com.raph.tool.ToolRegistry;
+import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
+import org.jline.reader.UserInterruptException;
 
 import java.io.IOException;
 
@@ -59,7 +61,21 @@ public class TuiSession {
         while (true) {
             renderer.print(TuiStatusLine.contextBar(currentContextUsage()));
 
-            String input = reader.readLine(mode.prompt()).trim();
+            String line;
+            try {
+                line = reader.readLine(mode.prompt());
+            } catch (UserInterruptException e) {
+                renderer.println("\n已取消当前输入。输入 /exit 可退出。\n");
+                continue;
+            } catch (EndOfFileException e) {
+                renderer.println("\n输入流已关闭，正在退出。\n");
+                break;
+            }
+            if (line == null) {
+                renderer.println("\n输入流已关闭，正在退出。\n");
+                break;
+            }
+            String input = line.trim();
             if (input.isEmpty()) {
                 continue;
             }
@@ -212,7 +228,8 @@ public class TuiSession {
         try {
             response = agent.run(input, streamRenderer);
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            renderer.println("\n❌ Agent 执行失败: " + e.getMessage() + "\n");
+            return;
         }
         if (streamRenderer.hasContent()) {
             renderer.println("");
@@ -268,13 +285,22 @@ public class TuiSession {
         switch (mode) {
             case NORMAL -> {
                 agent.clearHistory();
-                renderer.println("🗑️ 普通模式历史已清空\n");
+                memoryManager.clearSessionState();
+                toolRegistry.clearSessionState();
+                hitlHandler.clearApprovedAll();
+                renderer.println("🗑️ 普通模式历史、token 统计和本次会话授权已清空\n");
             }
             case TEAM -> {
                 teamRuntime = null;
+                toolRegistry.clearSessionState();
+                hitlHandler.clearApprovedAll();
                 renderer.println("🗑️ 团队模式会话记忆已清空\n");
             }
-            case PLAN -> renderer.println("🗑️ 计划模式暂无持久会话历史\n");
+            case PLAN -> {
+                toolRegistry.clearSessionState();
+                hitlHandler.clearApprovedAll();
+                renderer.println("🗑️ 计划模式暂无持久会话历史，本次会话授权已清空\n");
+            }
         }
     }
 

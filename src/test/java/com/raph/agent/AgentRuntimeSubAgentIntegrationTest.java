@@ -145,7 +145,8 @@ class AgentRuntimeSubAgentIntegrationTest {
 
     @Test
     void reviewerCanReadFilesForReview() throws Exception {
-        Path target = Path.of("/tmp/myagentcli-reviewer-read.txt");
+        Path target = testFile("myagentcli-reviewer-read.txt");
+        Files.createDirectories(target.getParent());
         Files.writeString(target, "review me", StandardCharsets.UTF_8);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         AgentRuntime runtime = new AgentRuntime(
@@ -164,7 +165,7 @@ class AgentRuntimeSubAgentIntegrationTest {
 
     @Test
     void researcherWriteFileActionIsDenied() throws Exception {
-        Path target = Path.of("/tmp/myagentcli-researcher-denied.txt");
+        Path target = testFile("myagentcli-researcher-denied.txt");
         Files.deleteIfExists(target);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         AgentRuntime runtime = new AgentRuntime(
@@ -183,7 +184,7 @@ class AgentRuntimeSubAgentIntegrationTest {
 
     @Test
     void coderWriteFileActionIsAllowed() throws Exception {
-        Path target = Path.of("/tmp/myagentcli-coder-write.txt");
+        Path target = testFile("myagentcli-coder-write.txt");
         Files.deleteIfExists(target);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         AgentRuntime runtime = new AgentRuntime(
@@ -222,7 +223,7 @@ class AgentRuntimeSubAgentIntegrationTest {
 
     @Test
     void coderCanUseWriteSubagentToModifyFile() throws Exception {
-        Path target = Path.of("/tmp/myagentcli-write-subagent.txt");
+        Path target = testFile("myagentcli-write-subagent.txt");
         Files.deleteIfExists(target);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         AgentRuntime runtime = new AgentRuntime(
@@ -245,7 +246,7 @@ class AgentRuntimeSubAgentIntegrationTest {
 
     @Test
     void researcherCannotUseWriteSubagent() throws Exception {
-        Path target = Path.of("/tmp/myagentcli-researcher-write-subagent-denied.txt");
+        Path target = testFile("myagentcli-researcher-write-subagent-denied.txt");
         Files.deleteIfExists(target);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         AgentRuntime runtime = new AgentRuntime(
@@ -260,6 +261,10 @@ class AgentRuntimeSubAgentIntegrationTest {
 
         assertTrue(log.contains("write mode denied for parent=researcher"), log);
         assertFalse(Files.exists(target), log);
+    }
+
+    private static Path testFile(String name) {
+        return Path.of("target", "test-files", name).toAbsolutePath().normalize();
     }
 
     private static final class FakeLlmClient implements LlmClient {

@@ -17,7 +17,10 @@ public record ApprovalRequest(
         String dangerLevel,
         String riskDescription,
         String suggestion,
-        String callerContext
+        String callerContext,
+        boolean workspaceApprovalRequired,
+        String workspacePath,
+        String workspaceSuggestedRoot
 ) {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BOX_INNER_WIDTH = 58;
@@ -35,7 +38,24 @@ public record ApprovalRequest(
                 ApprovalPolicy.getDangerLevel(toolName),
                 ApprovalPolicy.getRiskDescription(toolName),
                 suggestion,
-                callerContext
+                callerContext,
+                false,
+                null,
+                null
+        );
+    }
+
+    public ApprovalRequest withWorkspaceAccess(String path, String suggestedRoot) {
+        return new ApprovalRequest(
+                toolName,
+                arguments,
+                dangerLevel,
+                riskDescription,
+                suggestion,
+                callerContext,
+                true,
+                path,
+                suggestedRoot
         );
     }
 
@@ -52,6 +72,11 @@ public record ApprovalRequest(
         }
         sb.append(formatBoxField("等级", dangerLevel)).append("\n");
         sb.append(formatBoxField("风险", riskDescription)).append("\n");
+        if (workspaceApprovalRequired) {
+            sb.append(formatBoxField("工作区", "需要额外授权")).append("\n");
+            sb.append(formatBoxField("目标路径", workspacePath)).append("\n");
+            sb.append(formatBoxField("建议扩展", workspaceSuggestedRoot + "（仅当前会话）")).append("\n");
+        }
         if (callerContext != null && !callerContext.isBlank()) {
             sb.append(formatBoxField("来源", callerContext)).append("\n");
         }

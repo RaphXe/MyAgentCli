@@ -24,6 +24,12 @@ public class TokenBudget {
         this.injectedMemoryTokens = tokens;
     }
 
+    public synchronized void reset() {
+        this.currentConvTokens = 0;
+        this.compressedHistoryTokens = 0;
+        this.injectedMemoryTokens = 0;
+    }
+
     public synchronized int total() {
         return currentConvTokens + compressedHistoryTokens + injectedMemoryTokens;
     }

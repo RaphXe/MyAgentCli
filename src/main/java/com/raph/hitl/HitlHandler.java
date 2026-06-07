@@ -21,6 +21,9 @@ public interface HitlHandler {
     default void clearApprovedAll() {
     }
 
+    default void approveAllByTool(String toolName) {
+    }
+
     default void clearApprovedAllForServer(String serverName) {
     }
 }

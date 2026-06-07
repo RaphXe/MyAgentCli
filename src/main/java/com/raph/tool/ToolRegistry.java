@@ -12,6 +12,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -32,16 +33,24 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class ToolRegistry {
     private final Map<String, Tool> tools = new HashMap<>();
+    private final WorkspacePolicy workspacePolicy;
 
     private static final ObjectMapper mapper = new ObjectMapper();
+    private static final int MAX_READ_FILE_BYTES = 2 * 1024 * 1024;
     // 5MB 对常规代码生成 / 文档撰写完全够用，超过即拒，避免磁盘灌满与误覆盖。
     private static final int MAX_WRITE_FILE_BYTES = 5 * 1024 * 1024;
+    private static final int MAX_COMMAND_OUTPUT_CHARS = 64 * 1024;
     private static final int MAX_PARALLEL_TOOLS = 4;
     private static final long TOOL_TIMEOUT_SECONDS = 90;
     private static final AtomicLong TOOL_CALLING_SEQUENCE = new AtomicLong();
     private static final ConcurrentHashMap<Path, FileMutationOwner> ACTIVE_FILE_MUTATIONS = new ConcurrentHashMap<>();
 
     public ToolRegistry() {
+        this(WorkspacePolicy.defaultPolicy());
+    }
+
+    public ToolRegistry(WorkspacePolicy workspacePolicy) {
+        this.workspacePolicy = workspacePolicy == null ? WorkspacePolicy.defaultPolicy() : workspacePolicy;
         registerFileTools();
         registerNavigationTools();
         registerShellTools();
@@ -73,9 +82,12 @@ public class ToolRegistry {
                 createParameters(new Param("path", "string", "文件路径", true)),
                 ToolMetadata.readOnly(),
                 args -> {
-                    String path = args.get("path");
+                    Path path = workspacePolicy.resolve(args.get("path"));
                     try {
-                        String content = Files.readString(Path.of(path));
+                        if (Files.exists(path) && Files.size(path) > MAX_READ_FILE_BYTES) {
+                            return "读取文件失败: 文件超过读取上限 " + MAX_READ_FILE_BYTES + " bytes: " + path;
+                        }
+                        String content = Files.readString(path);
                         return "文件内容:\n" + content;
                     } catch (Exception e) {
                         return "读取文件失败: " + e.getMessage();
@@ -94,16 +106,23 @@ public class ToolRegistry {
                 ),
                 ToolMetadata.fileMutation("path"),
                 args -> {
-                    String path = args.get("path");
+                    Path path = workspacePolicy.resolve(args.get("path"));
                     String content = args.getOrDefault("content", "");
                     String mode = args.getOrDefault("mode", "overwrite");
                     try {
+                        if (content.getBytes(StandardCharsets.UTF_8).length > MAX_WRITE_FILE_BYTES) {
+                            return "写入文件失败: 内容超过写入上限 " + MAX_WRITE_FILE_BYTES + " bytes";
+                        }
+                        Path parent = path.getParent();
+                        if (parent != null) {
+                            Files.createDirectories(parent);
+                        }
                         if ("append".equalsIgnoreCase(mode)) {
-                            Files.writeString(Path.of(path), content,
+                            Files.writeString(path, content,
                                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
                             return "文件已追加写入: " + path;
                         }
-                        Files.writeString(Path.of(path), content);
+                        writeStringAtomically(path, content);
                         return "文件已覆盖写入: " + path;
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -118,10 +137,10 @@ public class ToolRegistry {
                 createParameters(new Param("path", "string", "目录路径", true)),
                 ToolMetadata.readOnly(),
                 args -> {
-                    String path = args.get("path");
+                    Path path = workspacePolicy.resolve(args.get("path"));
                     try {
                         StringBuilder sb = new StringBuilder();
-                        try (var stream = Files.list(Path.of(path))) {
+                        try (var stream = Files.list(path)) {
                             stream.sorted().forEach(entry -> {
                                 String name = entry.getFileName().toString();
                                 if (Files.isDirectory(entry)) {
@@ -151,7 +170,7 @@ public class ToolRegistry {
                 ),
                 ToolMetadata.readOnly(),
                 args -> {
-                    Path root = Path.of(args.getOrDefault("path", ".")).toAbsolutePath().normalize();
+                    Path root = workspacePolicy.resolve(args.getOrDefault("path", "."));
                     int maxDepth = clamp(parseInt(args.get("max_depth"), 3), 1, 6);
                     boolean includeFiles = parseBoolean(args.get("include_files"), true);
                     int maxEntries = 300;
@@ -206,7 +225,7 @@ public class ToolRegistry {
                 ),
                 ToolMetadata.readOnly(),
                 args -> {
-                    Path root = Path.of(args.getOrDefault("path", ".")).toAbsolutePath().normalize();
+                    Path root = workspacePolicy.resolve(args.getOrDefault("path", "."));
                     String query = args.getOrDefault("query", "").trim().toLowerCase();
                     int maxResults = clamp(parseInt(args.get("max_results"), 50), 1, 100);
                     if (query.isEmpty()) {
@@ -258,18 +277,23 @@ public class ToolRegistry {
                     String command = args.get("command");
                     try {
                         ProcessBuilder pb = new ProcessBuilder("bash", "-c", command);
+                        pb.directory(workspacePolicy.primaryRoot().toFile());
                         pb.redirectErrorStream(true);
                         Process process = pb.start();
+                        StringBuilder commandOutput = new StringBuilder();
+                        Thread outputReader = startProcessOutputReader(process, commandOutput);
 
                         boolean finished = process.waitFor(TOOL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                         if (!finished) {
                             process.destroyForcibly();
                             process.waitFor(1, TimeUnit.SECONDS);
-                            return "命令执行超时: 超过 " + TOOL_TIMEOUT_SECONDS + " 秒\n" + readProcessOutput(process);
+                            joinQuietly(outputReader);
+                            return "命令执行超时: 超过 " + TOOL_TIMEOUT_SECONDS + " 秒\n" + commandOutput;
                         }
+                        joinQuietly(outputReader);
                         int exitCode = process.exitValue();
                         return String.format("命令执行完成 (exit code: %d)\n%s",
-                                exitCode, readProcessOutput(process));
+                                exitCode, commandOutput);
                     } catch (Exception e) {
                         return "执行命令失败: " + e.getMessage();
                     }
@@ -291,10 +315,10 @@ public class ToolRegistry {
                 ),
                 ToolMetadata.fileMutation("name"),
                 args -> {
-                    String name = args.get("name");
+                    Path projectDir = workspacePolicy.resolve(args.get("name"));
+                    String name = projectDir.getFileName() == null ? projectDir.toString() : projectDir.getFileName().toString();
                     String type = args.getOrDefault("type", "general");
                     try {
-                        Path projectDir = Path.of(name);
                         Files.createDirectories(projectDir);
 
                         // 根据项目类型创建不同的目录结构
@@ -317,7 +341,7 @@ public class ToolRegistry {
                         String readme = "# " + name + "\n\n项目描述\n";
                         Files.writeString(projectDir.resolve("README.md"), readme);
 
-                        return "项目已创建: " + name + " (类型: " + type + ")";
+                        return "项目已创建: " + projectDir + " (类型: " + type + ")";
                     } catch (Exception e) {
                         return "创建项目失败: " + e.getMessage();
                     }
@@ -428,6 +452,11 @@ public class ToolRegistry {
 
         FileMutationLease lease = FileMutationLease.none();
         try {
+            WorkspaceAccess workspaceAccess = workspaceAccess(toolName, args.stringArgs());
+            if (workspaceAccess.requiresApproval()
+                    && !workspacePolicy.isAllowedOrConsumeOneTime(workspaceAccess.targetPath())) {
+                return workspaceDeniedMessage(workspaceAccess);
+            }
             lease = acquireFileMutationLease(tool, args.stringArgs(), toolCallingId, batchReservationHeld);
             if (lease.errorMessage() != null) {
                 return lease.errorMessage();
@@ -623,7 +652,7 @@ public class ToolRegistry {
         if (pathValue == null || pathValue.isBlank()) {
             return null;
         }
-        return Path.of(pathValue).toAbsolutePath().normalize();
+        return workspacePolicy.resolve(pathValue);
     }
 
     private static void addUniquePath(List<Path> paths, Path path) {
@@ -680,38 +709,48 @@ public class ToolRegistry {
         return "文件修改冲突: " + path + " 正在被另一个工具调用批次修改，请稍后重试或重新规划。";
     }
 
-    private static boolean pathsConflict(Path left, Path right) {
-        return left.equals(right) || left.startsWith(right) || right.startsWith(left);
-    }
-
-    private static ToolExecutionResult timeoutResult(LlmClient.ToolCall toolCall) {
-        return failureResult(toolCall, "工具执行超时: 超过 " + TOOL_TIMEOUT_SECONDS + " 秒");
-    }
-
-    private static ToolExecutionResult failureResult(LlmClient.ToolCall toolCall, String message) {
-        return new ToolExecutionResult(toolCall == null ? null : toolCall.id(), toolName(toolCall), message);
-    }
-
-    private static String toolName(LlmClient.ToolCall toolCall) {
-        if (toolCall == null || toolCall.function() == null) {
-            return "";
+    protected WorkspaceAccess workspaceAccess(String toolName, Map<String, String> args) {
+        if ("execute_command".equals(toolName)) {
+            return commandWorkspaceAccess(args == null ? null : args.get("command"));
         }
-        return Objects.toString(toolCall.function().name(), "");
+        WorkspaceTarget target = workspaceTarget(toolName, args);
+        if (target == null) {
+            return WorkspaceAccess.allowed();
+        }
+        Path resolved = workspacePolicy.resolve(target.rawPath());
+        if (workspacePolicy.isInsideWorkspace(resolved)) {
+            return WorkspaceAccess.allowed(resolved);
+        }
+        return WorkspaceAccess.requiresApproval(
+                resolved,
+                workspacePolicy.suggestedRoot(resolved, target.directoryIntent()),
+                "目标路径不在当前工作区内"
+        );
     }
 
-    private static String readProcessOutput(Process process) throws IOException {
-        StringBuilder output = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(process.getInputStream()))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
+    private WorkspaceAccess commandWorkspaceAccess(String command) {
+        for (String rawPath : absolutePathsInCommand(command)) {
+            Path resolved = workspacePolicy.resolve(rawPath);
+            if (!workspacePolicy.isInsideWorkspace(resolved)) {
+                return WorkspaceAccess.requiresApproval(
+                        resolved,
+                        workspacePolicy.suggestedRoot(resolved, Files.isDirectory(resolved)),
+                        "命令引用了当前工作区外的绝对路径"
+                );
             }
         }
-        return output.toString();
+        return WorkspaceAccess.allowed();
     }
 
-    private ParsedArguments parseArguments(String arguments) throws IOException {
+    protected WorkspacePolicy workspacePolicy() {
+        return workspacePolicy;
+    }
+
+    public void clearSessionState() {
+        workspacePolicy.resetSessionState();
+    }
+
+    protected ParsedArguments parseArguments(String arguments) throws IOException {
         Map<String, String> stringArgs = new HashMap<>();
         Map<String, JsonNode> jsonArgs = new HashMap<>();
         if (arguments == null || arguments.isBlank()) {
@@ -737,6 +776,162 @@ public class ToolRegistry {
             }
         });
         return new ParsedArguments(stringArgs, jsonArgs);
+    }
+
+    private WorkspaceTarget workspaceTarget(String toolName, Map<String, String> args) {
+        Map<String, String> safeArgs = args == null ? Map.of() : args;
+        return switch (toolName == null ? "" : toolName) {
+            case "read_file", "write_file" -> new WorkspaceTarget(safeArgs.get("path"), false);
+            case "list_dir", "project_tree", "search_files" ->
+                    new WorkspaceTarget(safeArgs.getOrDefault("path", "."), true);
+            case "create_project" -> new WorkspaceTarget(safeArgs.get("name"), true);
+            default -> null;
+        };
+    }
+
+    private static List<String> absolutePathsInCommand(String command) {
+        if (command == null || command.isBlank()) {
+            return List.of();
+        }
+        List<String> paths = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inSingleQuote = false;
+        boolean inDoubleQuote = false;
+        boolean escaped = false;
+        for (int i = 0; i < command.length(); i++) {
+            char ch = command.charAt(i);
+            if (escaped) {
+                current.append(ch);
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '\'' && !inDoubleQuote) {
+                inSingleQuote = !inSingleQuote;
+                continue;
+            }
+            if (ch == '"' && !inSingleQuote) {
+                inDoubleQuote = !inDoubleQuote;
+                continue;
+            }
+            if (!inSingleQuote && !inDoubleQuote && isShellDelimiter(ch)) {
+                addAbsolutePath(paths, current);
+                current.setLength(0);
+                continue;
+            }
+            current.append(ch);
+        }
+        addAbsolutePath(paths, current);
+        return List.copyOf(paths);
+    }
+
+    private static boolean isShellDelimiter(char ch) {
+        return Character.isWhitespace(ch) || ch == ';' || ch == '&' || ch == '|'
+                || ch == '<' || ch == '>' || ch == '(' || ch == ')';
+    }
+
+    private static void addAbsolutePath(List<String> paths, StringBuilder token) {
+        if (token == null || token.isEmpty()) {
+            return;
+        }
+        String value = token.toString().trim();
+        if (!value.startsWith("/")) {
+            return;
+        }
+        while (value.length() > 1 && (value.endsWith(",") || value.endsWith(":"))) {
+            value = value.substring(0, value.length() - 1);
+        }
+        if (!value.isBlank()) {
+            paths.add(value);
+        }
+    }
+
+    private static String workspaceDeniedMessage(WorkspaceAccess access) {
+        return "工作区访问被拒绝: " + access.targetPath()
+                + " 不在当前工作区内。请请求用户批准本次访问或扩展工作区到: "
+                + access.suggestedRoot();
+    }
+
+    private static void writeStringAtomically(Path path, String content) throws IOException {
+        Path parent = path.getParent();
+        String prefix = path.getFileName() == null ? "paicli" : path.getFileName().toString();
+        if (prefix.length() < 3) {
+            prefix = (prefix + "___").substring(0, 3);
+        }
+        Path temp = Files.createTempFile(parent == null ? Path.of(".") : parent,
+                prefix, ".tmp");
+        try {
+            Files.writeString(temp, content, StandardCharsets.UTF_8,
+                    StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+            try {
+                Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException atomicMoveFailure) {
+                Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    private static boolean pathsConflict(Path left, Path right) {
+        return left.equals(right) || left.startsWith(right) || right.startsWith(left);
+    }
+
+    private static ToolExecutionResult timeoutResult(LlmClient.ToolCall toolCall) {
+        return failureResult(toolCall, "工具执行超时: 超过 " + TOOL_TIMEOUT_SECONDS + " 秒");
+    }
+
+    private static ToolExecutionResult failureResult(LlmClient.ToolCall toolCall, String message) {
+        return new ToolExecutionResult(toolCall == null ? null : toolCall.id(), toolName(toolCall), message);
+    }
+
+    private static String toolName(LlmClient.ToolCall toolCall) {
+        if (toolCall == null || toolCall.function() == null) {
+            return "";
+        }
+        return Objects.toString(toolCall.function().name(), "");
+    }
+
+    private static Thread startProcessOutputReader(Process process, StringBuilder output) {
+        Thread thread = new Thread(() -> {
+            try {
+                readProcessOutput(process, output);
+            } catch (IOException e) {
+                output.append("\n读取命令输出失败: ").append(e.getMessage()).append("\n");
+            }
+        }, "tool-command-output-reader");
+        thread.setDaemon(true);
+        thread.start();
+        return thread;
+    }
+
+    private static void readProcessOutput(Process process, StringBuilder output) throws IOException {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (output.length() >= MAX_COMMAND_OUTPUT_CHARS) {
+                    output.append("\n...（输出已截断，最多 ")
+                            .append(MAX_COMMAND_OUTPUT_CHARS)
+                            .append(" 字符）\n");
+                    break;
+                }
+                output.append(line).append("\n");
+            }
+        }
+    }
+
+    private static void joinQuietly(Thread thread) {
+        if (thread == null) {
+            return;
+        }
+        try {
+            thread.join(1_000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public record Tool(String name, String description, JsonNode parameters, ToolMetadata metadata,
@@ -790,7 +985,23 @@ public class ToolRegistry {
         String execute(Map<String, JsonNode> args);
     }
 
-    private record ParsedArguments(Map<String, String> stringArgs, Map<String, JsonNode> jsonArgs) {}
+    public record WorkspaceAccess(boolean requiresApproval, Path targetPath, Path suggestedRoot, String reason) {
+        private static WorkspaceAccess allowed() {
+            return new WorkspaceAccess(false, null, null, null);
+        }
+
+        private static WorkspaceAccess allowed(Path targetPath) {
+            return new WorkspaceAccess(false, targetPath, null, null);
+        }
+
+        private static WorkspaceAccess requiresApproval(Path targetPath, Path suggestedRoot, String reason) {
+            return new WorkspaceAccess(true, targetPath, suggestedRoot, reason);
+        }
+    }
+
+    protected record ParsedArguments(Map<String, String> stringArgs, Map<String, JsonNode> jsonArgs) {}
+
+    private record WorkspaceTarget(String rawPath, boolean directoryIntent) {}
 
     private record Param(String name, String type, String description, boolean required) {}
 }

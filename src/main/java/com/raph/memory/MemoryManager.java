@@ -80,6 +80,11 @@ public class MemoryManager {
         tokenBudget.updateCurrentConvTokens(agent.getContextTokens());
     }
 
+    public void clearSessionState() {
+        lastInjectedContext = "";
+        tokenBudget.reset();
+    }
+
     public void saveToMemory(String description, Agent agent) throws IOException {
         if (description == null || description.isBlank()) {
             System.out.println("描述为空，无法保存");

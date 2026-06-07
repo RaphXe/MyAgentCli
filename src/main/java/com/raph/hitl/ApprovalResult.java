@@ -12,6 +12,8 @@ public record ApprovalResult(
         APPROVED,
         APPROVED_ALL,
         APPROVED_ALL_BY_SERVER,
+        APPROVED_EXPAND_WORKSPACE,
+        APPROVED_EXPAND_WORKSPACE_AND_ALL,
         REJECTED,
         MODIFIED,
         SKIPPED
@@ -27,6 +29,14 @@ public record ApprovalResult(
 
     public static ApprovalResult approveAllByServer() {
         return new ApprovalResult(Decision.APPROVED_ALL_BY_SERVER, null, null);
+    }
+
+    public static ApprovalResult approveExpandWorkspace() {
+        return new ApprovalResult(Decision.APPROVED_EXPAND_WORKSPACE, null, null);
+    }
+
+    public static ApprovalResult approveExpandWorkspaceAndAll() {
+        return new ApprovalResult(Decision.APPROVED_EXPAND_WORKSPACE_AND_ALL, null, null);
     }
 
     public static ApprovalResult reject(String reason) {
@@ -45,7 +55,19 @@ public record ApprovalResult(
         return decision == Decision.APPROVED
                 || decision == Decision.APPROVED_ALL
                 || decision == Decision.APPROVED_ALL_BY_SERVER
+                || decision == Decision.APPROVED_EXPAND_WORKSPACE
+                || decision == Decision.APPROVED_EXPAND_WORKSPACE_AND_ALL
                 || decision == Decision.MODIFIED;
+    }
+
+    public boolean expandsWorkspace() {
+        return decision == Decision.APPROVED_EXPAND_WORKSPACE
+                || decision == Decision.APPROVED_EXPAND_WORKSPACE_AND_ALL;
+    }
+
+    public boolean approvesAllByTool() {
+        return decision == Decision.APPROVED_ALL
+                || decision == Decision.APPROVED_EXPAND_WORKSPACE_AND_ALL;
     }
 
     public boolean isRejected() {

@@ -63,7 +63,15 @@ public class TerminalHitlHandler implements HitlHandler {
     private ApprovalResult promptUntilDecision(ApprovalRequest request) {
         for (int attempt = 0; attempt < 5; attempt++) {
             out.println();
-            out.println("请选择操作：[y/Enter] 批准  [a] 全部放行  [n] 拒绝  [s] 跳过  [m] 修改参数");
+            if (request.workspaceApprovalRequired()) {
+                if (ApprovalPolicy.requiresApproval(request.toolName())) {
+                    out.println("请选择操作：[y/Enter] 批准本次  [w] 扩展工作区（仅当前会话）  [wa] 扩展工作区并全部放行本工具  [a] 全部放行危险工具  [n] 拒绝  [s] 跳过  [m] 修改参数");
+                } else {
+                    out.println("请选择操作：[y/Enter] 批准本次  [w] 扩展工作区（仅当前会话）  [n] 拒绝  [s] 跳过  [m] 修改参数");
+                }
+            } else {
+                out.println("请选择操作：[y/Enter] 批准  [a] 全部放行  [n] 拒绝  [s] 跳过  [m] 修改参数");
+            }
             out.print("> ");
             out.flush();
 
@@ -85,6 +93,22 @@ public class TerminalHitlHandler implements HitlHandler {
                 return ApprovalResult.approve();
             }
             switch (normalized) {
+                case "w", "workspace", "expand" -> {
+                    if (request.workspaceApprovalRequired()) {
+                        out.println("  已批准，并将扩展工作区（仅当前会话）: " + request.workspaceSuggestedRoot());
+                        return ApprovalResult.approveExpandWorkspace();
+                    }
+                    out.println("  当前请求不需要扩展工作区");
+                }
+                case "wa", "aw", "workspace-all", "expand-all" -> {
+                    if (request.workspaceApprovalRequired() && ApprovalPolicy.requiresApproval(request.toolName())) {
+                        approvedAllByTool.add(request.toolName());
+                        out.println("  已批准，将扩展工作区（仅当前会话）: " + request.workspaceSuggestedRoot());
+                        out.println("  后续 " + request.toolName() + " 操作将在本次会话中自动通过");
+                        return ApprovalResult.approveExpandWorkspaceAndAll();
+                    }
+                    out.println("  当前请求不同时包含工作区扩展和危险工具审批");
+                }
                 case "a" -> {
                     return promptApproveAllScope(request);
                 }
@@ -109,7 +133,7 @@ public class TerminalHitlHandler implements HitlHandler {
                         return modified;
                     }
                 }
-                default -> out.println("  ❓ 无法识别的选项：'" + input + "'，请输入 y/a/n/s/m 之一（Enter 等价于 y）");
+                default -> out.println("  ❓ 无法识别的选项：'" + input + "'，请输入 y/w/wa/a/n/s/m 之一（Enter 等价于 y）");
             }
         }
         out.println("  [HITL] 连续多次无效输入，保守处理为拒绝");
@@ -187,6 +211,13 @@ public class TerminalHitlHandler implements HitlHandler {
     public void clearApprovedAll() {
         approvedAllByTool.clear();
         approvedAllByServer.clear();
+    }
+
+    @Override
+    public void approveAllByTool(String toolName) {
+        if (toolName != null && !toolName.isBlank()) {
+            approvedAllByTool.add(toolName);
+        }
     }
 
     @Override
