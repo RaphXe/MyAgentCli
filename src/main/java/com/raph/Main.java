@@ -8,6 +8,7 @@ import com.raph.hitl.TerminalHitlHandler;
 import com.raph.llm.DeepSeekClient;
 import com.raph.llm.LlmClient;
 import com.raph.memory.MemoryManager;
+import com.raph.mcp.MCPServerManager;
 import com.raph.plan.ExecutionPlan;
 import com.raph.render.PlainRenderer;
 import com.raph.render.Renderer;
@@ -48,10 +49,13 @@ public class Main {
         MemoryManager memoryManager = new MemoryManager(llmClient);
         memoryManager.init();
 
-        Agent agent = new Agent(llmClient, memoryManager, toolRegistry);
-        PlanExecuteAgent planAgent = new PlanExecuteAgent(llmClient, toolRegistry, truncateLimit);
         Renderer renderer = new PlainRenderer(System.out);
         renderer.start();
+        MCPServerManager mcpServerManager = MCPServerManager.fromDefaultConfig(toolRegistry, renderer::println);
+        mcpServerManager.startAllAndRegisterTools();
+
+        Agent agent = new Agent(llmClient, memoryManager, toolRegistry);
+        PlanExecuteAgent planAgent = new PlanExecuteAgent(llmClient, toolRegistry, truncateLimit);
 
         LineReader reader;
         try {
@@ -72,133 +76,137 @@ public class Main {
 
         boolean planMode = false;
 
-        while (true) {
-            String prompt = planMode ? PROMPT_PLAN : PROMPT_NORMAL;
+        try {
+            while (true) {
+                String prompt = planMode ? PROMPT_PLAN : PROMPT_NORMAL;
 
-            if (!planMode) {
-                renderer.print(contextBar(memoryManager, agent));
-            }
-
-            String input = reader.readLine(prompt).trim();
-
-            if (input.isEmpty()) continue;
-
-            if (input.equalsIgnoreCase("exit")) {
-                if (planMode) {
-                    planMode = false;
-                    renderer.println("🚪 已退出计划模式\n");
-                    continue;
+                if (!planMode) {
+                    renderer.print(contextBar(memoryManager, agent));
                 }
-                break;
-            }
 
-            if (input.equalsIgnoreCase("/plan")) {
-                planMode = !planMode;
-                if (planMode) {
-                    renderer.println("🧠 当前处于计划模式 — 输入你的任务目标，我将为你制定执行计划");
-                    renderer.println("   (输入 '/plan' 或 'exit' 退出计划模式)\n");
-                } else {
-                    renderer.println("🚪 已退出计划模式\n");
-                }
-                continue;
-            }
+                String input = reader.readLine(prompt).trim();
 
-            if (!planMode && input.equalsIgnoreCase("/hitl")) {
-                renderer.println("🛡️ HITL 当前状态: " + (hitlHandler.isEnabled() ? "启用" : "关闭") + "\n");
-                continue;
-            }
+                if (input.isEmpty()) continue;
 
-            if (!planMode && input.equalsIgnoreCase("/hitl on")) {
-                hitlHandler.setEnabled(true);
-                renderer.println("🛡️ HITL 人工审批已启用。危险工具将先请求确认。\n");
-                continue;
-            }
-
-            if (!planMode && input.equalsIgnoreCase("/hitl off")) {
-                hitlHandler.setEnabled(false);
-                hitlHandler.clearApprovedAll();
-                renderer.println("🛡️ HITL 人工审批已关闭，全部放行缓存已清空。\n");
-                continue;
-            }
-
-            if (!planMode && input.toLowerCase().startsWith("/team ")) {
-                String teamTask = input.substring(6).trim();
-                if (teamTask.isEmpty()) {
-                    renderer.println("❌ 用法: /team <任务内容>\n");
-                    continue;
-                }
-                renderer.println("👥 启动自治 Multi-Agent 协作...\n");
-                try {
-                    AgentRuntime runtime = new AgentRuntime(llmClient, toolRegistry, renderer);
-                    String response = runtime.run(teamTask);
-                    renderer.println(response);
-                } catch (IOException e) {
-                    renderer.println("❌ 多 Agent 执行失败: " + e.getMessage() + "\n");
-                }
-                continue;
-            }
-
-            if (!planMode && input.equalsIgnoreCase("clear")) {
-                agent.clearHistory();
-                renderer.println("🗑️ 历史已清空\n");
-                continue;
-            }
-
-            if (!planMode && input.toLowerCase().startsWith("/save")) {
-                String description = input.substring(5).trim();
-                if (description.isEmpty()) {
-                    renderer.println("❌ 用法: /save <描述内容>\n");
-                    continue;
-                }
-                try {
-                    memoryManager.saveToMemory(description, agent);
-                    renderer.println("");
-                } catch (IOException e) {
-                    renderer.println("❌ 保存记忆失败: " + e.getMessage() + "\n");
-                }
-                continue;
-            }
-
-            if (planMode) {
-                renderer.print("🤔 规划中...");
-                try {
-                    ExecutionPlan plan = planAgent.createPlan(input);
-                    renderer.print("\r              \r");
-                    renderer.println(planAgent.formatPlan(plan));
-
-                    String confirm = reader.readLine(PROMPT_CONFIRM).trim();
-                    if (confirm.equalsIgnoreCase("y") || confirm.equalsIgnoreCase("yes")) {
-                        runPlanExecutionLoop(planAgent, plan, reader, renderer);
-                    } else {
-                        renderer.println("⏭ 已取消执行\n");
+                if (input.equalsIgnoreCase("exit")) {
+                    if (planMode) {
+                        planMode = false;
+                        renderer.println("🚪 已退出计划模式\n");
+                        continue;
                     }
-                } catch (IOException e) {
-                    renderer.print("\r              \r");
-                    renderer.println("❌ 计划创建失败: " + e.getMessage() + "\n");
+                    break;
                 }
-            } else {
-                renderer.print("🤔 思考中...");
-                String response;
-                Renderer.StreamHandle streamRenderer = renderer.contentStream("🤖 Agent: ");
-                try {
-                    response = agent.run(input, streamRenderer);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
+
+                if (input.equalsIgnoreCase("/plan")) {
+                    planMode = !planMode;
+                    if (planMode) {
+                        renderer.println("🧠 当前处于计划模式 — 输入你的任务目标，我将为你制定执行计划");
+                        renderer.println("   (输入 '/plan' 或 'exit' 退出计划模式)\n");
+                    } else {
+                        renderer.println("🚪 已退出计划模式\n");
+                    }
+                    continue;
                 }
-                if (streamRenderer.hasContent()) {
-                    renderer.println("");
+
+                if (!planMode && input.equalsIgnoreCase("/hitl")) {
+                    renderer.println("🛡️ HITL 当前状态: " + (hitlHandler.isEnabled() ? "启用" : "关闭") + "\n");
+                    continue;
+                }
+
+                if (!planMode && input.equalsIgnoreCase("/hitl on")) {
+                    hitlHandler.setEnabled(true);
+                    renderer.println("🛡️ HITL 人工审批已启用。危险工具将先请求确认。\n");
+                    continue;
+                }
+
+                if (!planMode && input.equalsIgnoreCase("/hitl off")) {
+                    hitlHandler.setEnabled(false);
+                    hitlHandler.clearApprovedAll();
+                    renderer.println("🛡️ HITL 人工审批已关闭，全部放行缓存已清空。\n");
+                    continue;
+                }
+
+                if (!planMode && input.toLowerCase().startsWith("/team ")) {
+                    String teamTask = input.substring(6).trim();
+                    if (teamTask.isEmpty()) {
+                        renderer.println("❌ 用法: /team <任务内容>\n");
+                        continue;
+                    }
+                    renderer.println("👥 启动自治 Multi-Agent 协作...\n");
+                    try {
+                        AgentRuntime runtime = new AgentRuntime(llmClient, toolRegistry, renderer);
+                        String response = runtime.run(teamTask);
+                        renderer.println(response);
+                    } catch (IOException e) {
+                        renderer.println("❌ 多 Agent 执行失败: " + e.getMessage() + "\n");
+                    }
+                    continue;
+                }
+
+                if (!planMode && input.equalsIgnoreCase("clear")) {
+                    agent.clearHistory();
+                    renderer.println("🗑️ 历史已清空\n");
+                    continue;
+                }
+
+                if (!planMode && input.toLowerCase().startsWith("/save")) {
+                    String description = input.substring(5).trim();
+                    if (description.isEmpty()) {
+                        renderer.println("❌ 用法: /save <描述内容>\n");
+                        continue;
+                    }
+                    try {
+                        memoryManager.saveToMemory(description, agent);
+                        renderer.println("");
+                    } catch (IOException e) {
+                        renderer.println("❌ 保存记忆失败: " + e.getMessage() + "\n");
+                    }
+                    continue;
+                }
+
+                if (planMode) {
+                    renderer.print("🤔 规划中...");
+                    try {
+                        ExecutionPlan plan = planAgent.createPlan(input);
+                        renderer.print("\r              \r");
+                        renderer.println(planAgent.formatPlan(plan));
+
+                        String confirm = reader.readLine(PROMPT_CONFIRM).trim();
+                        if (confirm.equalsIgnoreCase("y") || confirm.equalsIgnoreCase("yes")) {
+                            runPlanExecutionLoop(planAgent, plan, reader, renderer);
+                        } else {
+                            renderer.println("⏭ 已取消执行\n");
+                        }
+                    } catch (IOException e) {
+                        renderer.print("\r              \r");
+                        renderer.println("❌ 计划创建失败: " + e.getMessage() + "\n");
+                    }
                 } else {
-                    renderer.print("\r              \r");
-                    renderer.println("🤖 Agent: " + response);
+                    renderer.print("🤔 思考中...");
+                    String response;
+                    Renderer.StreamHandle streamRenderer = renderer.contentStream("🤖 Agent: ");
+                    try {
+                        response = agent.run(input, streamRenderer);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                    if (streamRenderer.hasContent()) {
+                        renderer.println("");
+                    } else {
+                        renderer.print("\r              \r");
+                        renderer.println("🤖 Agent: " + response);
+                    }
+                    renderer.printf("📊 Token 消耗: 输入 %d + 输出 %d = 总计 %d | 上下文: %s/%s (%.1f%%)%n%n",
+                            agent.getLastInputTokens(),
+                            agent.getLastOutputTokens(),
+                            agent.getLastTotalTokens(),
+                            formatTokens(agent.getContextTokens()),
+                            formatTokens(agent.getMaxContextTokens()),
+                            agent.getContextUsagePercent());
                 }
-                renderer.printf("📊 Token 消耗: 输入 %d + 输出 %d = 总计 %d | 上下文: %s/%s (%.1f%%)%n%n",
-                        agent.getLastInputTokens(),
-                        agent.getLastOutputTokens(),
-                        agent.getLastTotalTokens(),
-                        formatTokens(agent.getContextTokens()),
-                        formatTokens(agent.getMaxContextTokens()),
-                        agent.getContextUsagePercent());
             }
+        } finally {
+            mcpServerManager.close();
         }
     }
 

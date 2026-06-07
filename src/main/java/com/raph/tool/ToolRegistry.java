@@ -48,6 +48,17 @@ public class ToolRegistry {
         registerProjectTools();
     }
 
+    public synchronized void registerTool(Tool tool) {
+        if (tool == null || tool.name() == null || tool.name().isBlank()) {
+            return;
+        }
+        tools.put(tool.name(), tool);
+    }
+
+    public synchronized boolean hasTool(String name) {
+        return name != null && tools.containsKey(name);
+    }
+
     private void registerFileTools () {
         // read_file 工具
         tools.put("read_file", new Tool(
@@ -402,7 +413,7 @@ public class ToolRegistry {
             return "工具不存在: " + toolName;
         }
 
-        Map<String, String> args;
+        ParsedArguments args;
         try {
             args = parseArguments(arguments);
         } catch (Exception e) {
@@ -411,11 +422,14 @@ public class ToolRegistry {
 
         FileMutationLease lease = FileMutationLease.none();
         try {
-            lease = acquireFileMutationLease(tool, args, toolCallingId, batchReservationHeld);
+            lease = acquireFileMutationLease(tool, args.stringArgs(), toolCallingId, batchReservationHeld);
             if (lease.errorMessage() != null) {
                 return lease.errorMessage();
             }
-            return tool.executor().execute(args);
+            if (tool.jsonExecutor() != null) {
+                return tool.jsonExecutor().execute(args.jsonArgs());
+            }
+            return tool.executor().execute(args.stringArgs());
         } catch (Exception e) {
             return "工具执行失败: " + e.getMessage();
         } finally {
@@ -588,7 +602,7 @@ public class ToolRegistry {
             return null;
         }
         try {
-            return mutationPath(tool, parseArguments(arguments));
+            return mutationPath(tool, parseArguments(arguments).stringArgs());
         } catch (Exception e) {
             return null;
         }
@@ -691,10 +705,11 @@ public class ToolRegistry {
         return output.toString();
     }
 
-    private Map<String, String> parseArguments(String arguments) throws IOException {
-        Map<String, String> args = new HashMap<>();
+    private ParsedArguments parseArguments(String arguments) throws IOException {
+        Map<String, String> stringArgs = new HashMap<>();
+        Map<String, JsonNode> jsonArgs = new HashMap<>();
         if (arguments == null || arguments.isBlank()) {
-            return args;
+            return new ParsedArguments(stringArgs, jsonArgs);
         }
 
         JsonNode root = mapper.readTree(arguments);
@@ -705,18 +720,31 @@ public class ToolRegistry {
         root.fields().forEachRemaining(entry -> {
             JsonNode value = entry.getValue();
             if (value == null || value.isNull()) {
-                args.put(entry.getKey(), null);
+                stringArgs.put(entry.getKey(), null);
+                jsonArgs.put(entry.getKey(), mapper.nullNode());
             } else if (value.isValueNode()) {
-                args.put(entry.getKey(), value.asText());
+                stringArgs.put(entry.getKey(), value.asText());
+                jsonArgs.put(entry.getKey(), value);
             } else {
-                args.put(entry.getKey(), value.toString());
+                stringArgs.put(entry.getKey(), value.toString());
+                jsonArgs.put(entry.getKey(), value);
             }
         });
-        return args;
+        return new ParsedArguments(stringArgs, jsonArgs);
     }
 
     public record Tool(String name, String description, JsonNode parameters, ToolMetadata metadata,
-                       ToolExecutor executor) {}
+                       ToolExecutor executor, JsonToolExecutor jsonExecutor) {
+        public Tool(String name, String description, JsonNode parameters, ToolMetadata metadata,
+                    ToolExecutor executor) {
+            this(name, description, parameters, metadata, executor, null);
+        }
+
+        public static Tool json(String name, String description, JsonNode parameters, ToolMetadata metadata,
+                                JsonToolExecutor executor) {
+            return new Tool(name, description, parameters, metadata, null, executor);
+        }
+    }
 
     public record ToolMetadata(boolean mutatesFile, String pathArgument) {
         public static ToolMetadata readOnly() {
@@ -751,6 +779,12 @@ public class ToolRegistry {
     public interface ToolExecutor {
         String execute(Map<String, String> args);
     }
+
+    public interface JsonToolExecutor {
+        String execute(Map<String, JsonNode> args);
+    }
+
+    private record ParsedArguments(Map<String, String> stringArgs, Map<String, JsonNode> jsonArgs) {}
 
     private record Param(String name, String type, String description, boolean required) {}
 }
