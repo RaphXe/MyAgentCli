@@ -15,11 +15,7 @@ public class MemoryRetriever {
     private static final double SOURCE_WEIGHT_DEFAULT = 1.0;
     private static final long HALF_LIFE_DAYS = 30;
 
-    private final JiebaSegmenter segmenter;
-
-    public MemoryRetriever() {
-        this.segmenter = new JiebaSegmenter();
-    }
+    private JiebaSegmenter segmenter;
 
     public List<ScoredMemory> retrieve(String query, List<MemoryEntry> memories) {
         return retrieve(query, memories, DEFAULT_TOP_K);
@@ -62,11 +58,18 @@ public class MemoryRetriever {
     }
 
     private Set<String> tokenize(String text) {
-        List<SegToken> tokens = segmenter.process(text, JiebaSegmenter.SegMode.SEARCH);
+        List<SegToken> tokens = segmenter().process(text, JiebaSegmenter.SegMode.SEARCH);
         return tokens.stream()
                 .map(t -> t.word.trim().toLowerCase())
                 .filter(w -> w.length() >= 2 && !isStopWord(w))
                 .collect(Collectors.toSet());
+    }
+
+    private synchronized JiebaSegmenter segmenter() {
+        if (segmenter == null) {
+            segmenter = new JiebaSegmenter();
+        }
+        return segmenter;
     }
 
     private double jaccardSimilarity(Set<String> set1, Set<String> set2) {

@@ -6,8 +6,8 @@ import com.raph.agent.Agent;
 import com.raph.agent.PlanExecuteAgent;
 import com.raph.hitl.HitlToolRegistry;
 import com.raph.hitl.TerminalHitlHandler;
-import com.raph.llm.DeepSeekClient;
 import com.raph.llm.LlmClient;
+import com.raph.llm.LlmClientManager;
 import com.raph.memory.MemoryManager;
 import com.raph.mcp.MCPServerManager;
 import com.raph.render.PlainRenderer;
@@ -28,12 +28,8 @@ public class Main {
         printBanner();
 
         CliConfig config = CliConfig.load();
-        if (config.apiKey() == null || config.apiKey().isEmpty()) {
-            System.err.println("❌ 错误: 未找到 API_KEY");
-            System.exit(1);
-        }
-
-        LlmClient llmClient = new DeepSeekClient(config.apiKey());
+        LlmClientManager llmClientManager = new LlmClientManager(config.llmConfig());
+        LlmClient llmClient = llmClientManager;
         TerminalHitlHandler hitlHandler = new TerminalHitlHandler(false);
         ToolRegistry toolRegistry = new HitlToolRegistry(hitlHandler);
 
@@ -64,7 +60,12 @@ public class Main {
         }
 
         try {
-            new TuiSession(reader, renderer, llmClient, toolRegistry, hitlHandler,
+            if (llmClientManager.isConnected()) {
+                renderer.println("✅ LLM 已连接: " + llmClientManager.status() + "\n");
+            } else {
+                renderer.println("⚠ 未配置 LLM。请使用 /connect <api_base> 连接 OpenAI-compatible provider。\n");
+            }
+            new TuiSession(reader, renderer, llmClientManager, toolRegistry, hitlHandler,
                     memoryManager, mcpServerManager, agent, planAgent).run();
         } finally {
             mcpServerManager.close();

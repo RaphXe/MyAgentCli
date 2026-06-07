@@ -52,4 +52,15 @@ class TuiCommandParserTest {
         assertEquals(TuiCommand.Type.UNKNOWN, command.type());
         assertEquals("value", command.arguments());
     }
+
+    @Test
+    void llmCommandsRequireSlashPrefix() {
+        TuiCommand bareConnect = TuiCommandParser.parse("connect https://api.example.com/v1");
+        assertEquals(TuiCommand.Type.USER_INPUT, bareConnect.type());
+        assertEquals("connect https://api.example.com/v1", bareConnect.arguments());
+
+        assertEquals(TuiCommand.Type.USER_INPUT, TuiCommandParser.parse("model").type());
+        assertEquals(TuiCommand.Type.CONNECT, TuiCommandParser.parse("/connect https://api.example.com/v1").type());
+        assertEquals(TuiCommand.Type.MODEL, TuiCommandParser.parse("/model").type());
+    }
 }

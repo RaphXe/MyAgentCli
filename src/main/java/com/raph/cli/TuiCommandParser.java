@@ -25,6 +25,8 @@ public final class TuiCommandParser {
             case "/mcp" -> TuiCommand.Type.MCP;
             case "/skills" -> TuiCommand.Type.SKILLS;
             case "/hitl" -> TuiCommand.Type.HITL;
+            case "/connect" -> TuiCommand.Type.CONNECT;
+            case "/model" -> TuiCommand.Type.MODEL;
             case "/save" -> TuiCommand.Type.SAVE;
             case "/clear" -> TuiCommand.Type.CLEAR;
             case "/exit" -> TuiCommand.Type.EXIT;

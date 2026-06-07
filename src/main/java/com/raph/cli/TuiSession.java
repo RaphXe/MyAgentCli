@@ -4,7 +4,8 @@ import com.raph.agent.Agent;
 import com.raph.agent.AgentRuntime;
 import com.raph.agent.PlanExecuteAgent;
 import com.raph.hitl.TerminalHitlHandler;
-import com.raph.llm.LlmClient;
+import com.raph.llm.LlmClientManager;
+import com.raph.llm.LlmConfig;
 import com.raph.memory.ContextUsage;
 import com.raph.memory.MemoryManager;
 import com.raph.mcp.MCPServerManager;
@@ -18,13 +19,14 @@ import org.jline.reader.LineReader;
 import org.jline.reader.UserInterruptException;
 
 import java.io.IOException;
+import java.util.List;
 
 public class TuiSession {
     private static final String PROMPT_CONFIRM = "❓ 是否执行此计划? [y/n]: ";
 
     private final LineReader reader;
     private final Renderer renderer;
-    private final LlmClient llmClient;
+    private final LlmClientManager llmClient;
     private final ToolRegistry toolRegistry;
     private final TerminalHitlHandler hitlHandler;
     private final MemoryManager memoryManager;
@@ -37,7 +39,7 @@ public class TuiSession {
 
     public TuiSession(LineReader reader,
                       Renderer renderer,
-                      LlmClient llmClient,
+                      LlmClientManager llmClient,
                       ToolRegistry toolRegistry,
                       TerminalHitlHandler hitlHandler,
                       MemoryManager memoryManager,
@@ -56,7 +58,7 @@ public class TuiSession {
     }
 
     public void run() {
-        renderer.println("💡 提示: 输入 '/plan' 切换计划模式, '/team' 切换团队模式, '/mcp' 查看 MCP, '/skills' 查看 skill, '/hitl on|off' 切换人工审批, '/save <描述>' 保存记忆, '/clear' 清空历史, '/exit' 退出或返回普通模式\n");
+        renderer.println("💡 提示: 输入 '/connect <api_base>' 连接模型, '/model' 切换模型, '/plan' 切换计划模式, '/team' 切换团队模式, '/mcp' 查看 MCP, '/skills' 查看 skill, '/hitl on|off' 切换人工审批, '/save <描述>' 保存记忆, '/clear' 清空历史, '/exit' 退出或返回普通模式\n");
 
         while (true) {
             renderer.print(TuiStatusLine.contextBar(currentContextUsage()));
@@ -104,6 +106,8 @@ public class TuiSession {
             case MCP -> handleMcpCommand(command.arguments());
             case SKILLS -> handleSkillsCommand(command.arguments());
             case HITL -> handleHitlCommand(command.arguments());
+            case CONNECT -> handleConnectCommand(command.arguments());
+            case MODEL -> handleModelCommand();
             case SAVE -> saveMemory(command.arguments());
             case CLEAR -> clearHistory();
             case EXIT -> exitOrReturnToNormal();
@@ -270,6 +274,116 @@ public class TuiSession {
         renderer.println("❌ 用法: /hitl [on|off]\n");
     }
 
+    private void handleConnectCommand(String arguments) {
+        String baseUrl = normalizeConnectBaseUrl(arguments);
+        if (baseUrl.isEmpty()) {
+            renderer.println("❌ 用法: /connect <api_base>，例如 /connect https://api.openai.com/v1\n");
+            return;
+        }
+
+        String apiKey;
+        try {
+            apiKey = reader.readLine("🔑 API key: ", '*').trim();
+        } catch (UserInterruptException e) {
+            renderer.println("\n已取消连接。\n");
+            return;
+        } catch (EndOfFileException e) {
+            renderer.println("\n输入流已关闭，无法连接。\n");
+            return;
+        }
+        if (apiKey.isEmpty()) {
+            renderer.println("❌ API key 不能为空\n");
+            return;
+        }
+
+        renderer.println("🔌 正在连接并获取模型列表...\n");
+        try {
+            List<String> models = llmClient.probeModels(baseUrl, apiKey);
+            String selectedModel = chooseModel(models);
+            if (selectedModel == null || selectedModel.isBlank()) {
+                renderer.println("⏭ 已取消模型选择\n");
+                return;
+            }
+            llmClient.connect(new LlmConfig(LlmConfig.OPENAI_COMPATIBLE, baseUrl, apiKey, selectedModel));
+            renderer.println("✅ LLM 已连接: " + llmClient.status() + "\n");
+        } catch (IOException | IllegalArgumentException e) {
+            renderer.println("❌ 连接失败: " + e.getMessage() + "\n");
+        }
+    }
+
+    private void handleModelCommand() {
+        if (!llmClient.isConnected()) {
+            renderer.println("❌ 尚未连接 LLM provider，请先使用 /connect <api_base>\n");
+            return;
+        }
+        LlmConfig config = llmClient.config();
+        renderer.println("🔎 正在获取模型列表...\n");
+        try {
+            List<String> models = llmClient.probeModels(config.baseUrl(), config.apiKey());
+            String selectedModel = chooseModel(models);
+            if (selectedModel == null || selectedModel.isBlank()) {
+                renderer.println("⏭ 已取消模型选择\n");
+                return;
+            }
+            llmClient.selectModel(selectedModel);
+            renderer.println("✅ 当前模型: " + selectedModel + "\n");
+        } catch (IOException | IllegalArgumentException | IllegalStateException e) {
+            renderer.println("❌ 模型列表获取失败: " + e.getMessage() + "\n");
+        }
+    }
+
+    private String chooseModel(List<String> models) {
+        if (models == null || models.isEmpty()) {
+            renderer.println("⚠ 远端未返回模型列表，请手动输入模型名。\n");
+            return readModelSelection();
+        }
+
+        StringBuilder sb = new StringBuilder("可用模型:\n");
+        int limit = Math.min(models.size(), 80);
+        for (int i = 0; i < limit; i++) {
+            sb.append(String.format("%2d. %s%n", i + 1, models.get(i)));
+        }
+        if (models.size() > limit) {
+            sb.append("... 已截断，仍可直接输入完整模型名\n");
+        }
+        renderer.println(sb.toString());
+
+        String selection = readModelSelection();
+        if (selection == null || selection.isBlank()) {
+            return null;
+        }
+        try {
+            int index = Integer.parseInt(selection.trim());
+            if (index >= 1 && index <= models.size()) {
+                return models.get(index - 1);
+            }
+            renderer.println("❌ 模型编号超出范围\n");
+            return null;
+        } catch (NumberFormatException ignored) {
+            return selection.trim();
+        }
+    }
+
+    private String readModelSelection() {
+        try {
+            return reader.readLine("请选择模型编号或输入模型名: ").trim();
+        } catch (UserInterruptException e) {
+            renderer.println("\n已取消模型选择。\n");
+            return null;
+        } catch (EndOfFileException e) {
+            renderer.println("\n输入流已关闭，无法选择模型。\n");
+            return null;
+        }
+    }
+
+    private String normalizeConnectBaseUrl(String arguments) {
+        String value = arguments == null ? "" : arguments.trim();
+        if (value.startsWith("+")) {
+            value = value.substring(1).trim();
+        }
+        return value;
+    }
+
     private void handleTeamCommand(TuiCommand command) {
         if (command.hasArguments()) {
             if (mode != SessionMode.TEAM) {
@@ -345,8 +459,8 @@ public class TuiSession {
             return;
         }
         try {
-            memoryManager.saveToMemory(description, agent);
-            renderer.println("");
+            MemoryManager.SaveMemoryResult result = memoryManager.saveToMemory(description, agent);
+            renderer.println((result.saved() ? "✅ " : "❌ ") + result.message() + "\n");
         } catch (IOException e) {
             renderer.println("❌ 保存记忆失败: " + e.getMessage() + "\n");
         }

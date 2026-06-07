@@ -1,5 +1,7 @@
 package com.raph.cli;
 
+import com.raph.llm.LlmConfig;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -10,24 +12,30 @@ import java.nio.file.Files;
  */
 public final class CliConfig {
     private static final int DEFAULT_OUTPUT_TRUNCATE_LIMIT = 2000;
+    private static final String DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
+    private static final String DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
 
-    private final String apiKey;
+    private final LlmConfig llmConfig;
     private final int outputTruncateLimit;
 
-    private CliConfig(String apiKey, int outputTruncateLimit) {
-        this.apiKey = apiKey;
+    private CliConfig(LlmConfig llmConfig, int outputTruncateLimit) {
+        this.llmConfig = llmConfig;
         this.outputTruncateLimit = outputTruncateLimit;
     }
 
     public static CliConfig load() {
         return new CliConfig(
-                readEnvValue("GLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "API_KEY"),
+                loadLlmConfig(),
                 loadOutputTruncateLimit()
         );
     }
 
+    public LlmConfig llmConfig() {
+        return llmConfig;
+    }
+
     public String apiKey() {
-        return apiKey;
+        return llmConfig == null ? null : llmConfig.apiKey();
     }
 
     public int outputTruncateLimit() {
@@ -47,6 +55,23 @@ public final class CliConfig {
             }
         }
         return DEFAULT_OUTPUT_TRUNCATE_LIMIT;
+    }
+
+    private static LlmConfig loadLlmConfig() {
+        String apiKey = readEnvValue("PAICLI_LLM_API_KEY", "GLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "API_KEY");
+        if (apiKey == null || apiKey.isBlank()) {
+            return null;
+        }
+
+        String baseUrl = readEnvValue("PAICLI_LLM_BASE_URL", "OPENAI_BASE_URL", "OPENAI_API_BASE");
+        String model = readEnvValue("PAICLI_LLM_MODEL", "OPENAI_MODEL", "MODEL");
+        if (baseUrl == null || baseUrl.isBlank()) {
+            baseUrl = DEFAULT_DEEPSEEK_BASE_URL;
+        }
+        if (model == null || model.isBlank()) {
+            model = DEFAULT_DEEPSEEK_MODEL;
+        }
+        return new LlmConfig(LlmConfig.OPENAI_COMPATIBLE, baseUrl, apiKey, model);
     }
 
     /**

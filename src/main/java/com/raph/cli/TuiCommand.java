@@ -8,6 +8,8 @@ public record TuiCommand(Type type, String arguments, String rawInput) {
         MCP,
         SKILLS,
         HITL,
+        CONNECT,
+        MODEL,
         SAVE,
         CLEAR,
         EXIT,

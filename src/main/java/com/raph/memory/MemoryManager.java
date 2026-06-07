@@ -17,17 +17,24 @@ public class MemoryManager {
     private final LlmClient llmClient;
 
     private String lastInjectedContext;
+    private String lastWarning;
 
     public MemoryManager(LlmClient llmClient) {
+        this(llmClient, new LongTermHistory());
+    }
+
+    public MemoryManager(LlmClient llmClient, LongTermHistory longTermHistory) {
         this.llmClient = llmClient;
-        this.longTermHistory = new LongTermHistory();
+        this.longTermHistory = longTermHistory == null ? new LongTermHistory() : longTermHistory;
         this.memoryRetriever = new MemoryRetriever();
         this.tokenBudget = new TokenBudget(ContextWindowConfig.loadMaxContextTokens());
         this.contextCompressor = new ContextCompressor();
     }
 
-    public void init() {
-        longTermHistory.load();
+    public LongTermHistory.LoadResult init() {
+        LongTermHistory.LoadResult result = longTermHistory.load();
+        lastWarning = result.success() ? null : result.message();
+        return result;
     }
 
     public String enrichSystemPrompt(String userQuery) {
@@ -71,7 +78,7 @@ public class MemoryManager {
                     tokenBudget.updateCompressedHistoryTokens(result.estimatedCompressedTokens());
                 }
             } catch (IOException e) {
-                System.err.println("上下文压缩失败: " + e.getMessage());
+                lastWarning = "上下文压缩失败: " + e.getMessage();
             }
         }
     }
@@ -82,13 +89,13 @@ public class MemoryManager {
 
     public void clearSessionState() {
         lastInjectedContext = "";
+        lastWarning = null;
         tokenBudget.reset();
     }
 
-    public void saveToMemory(String description, Agent agent) throws IOException {
+    public SaveMemoryResult saveToMemory(String description, Agent agent) throws IOException {
         if (description == null || description.isBlank()) {
-            System.out.println("描述为空，无法保存");
-            return;
+            return SaveMemoryResult.rejected("描述为空，无法保存");
         }
 
         MemoryType type = description.contains("偏好") || description.contains("喜欢")
@@ -104,8 +111,14 @@ public class MemoryManager {
         );
 
         longTermHistory.addEntry(entry);
-        longTermHistory.save();
-        System.out.println("已保存 1 条记忆到长期记忆中");
+        LongTermHistory.SaveResult saveResult;
+        try {
+            saveResult = longTermHistory.save();
+        } catch (IOException e) {
+            longTermHistory.removeEntry(entry.id());
+            throw e;
+        }
+        return SaveMemoryResult.saved(entry, saveResult.storagePath(), saveResult.count());
     }
 
     public TokenBudget getTokenBudget() {
@@ -116,8 +129,23 @@ public class MemoryManager {
         return longTermHistory;
     }
 
+    public String getLastWarning() {
+        return lastWarning;
+    }
+
     private int estimateTokens(String text) {
         return text == null ? 0 : (int) Math.ceil(text.length() / 3.5);
     }
 
+    public record SaveMemoryResult(boolean saved, MemoryEntry entry, java.nio.file.Path storagePath,
+                                   int totalCount, String message) {
+        private static SaveMemoryResult saved(MemoryEntry entry, java.nio.file.Path storagePath, int totalCount) {
+            return new SaveMemoryResult(true, entry, storagePath, totalCount,
+                    "已保存 1 条记忆到长期记忆中");
+        }
+
+        private static SaveMemoryResult rejected(String message) {
+            return new SaveMemoryResult(false, null, null, 0, message);
+        }
+    }
 }
