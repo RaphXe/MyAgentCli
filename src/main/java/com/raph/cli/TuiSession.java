@@ -10,6 +10,8 @@ import com.raph.memory.MemoryManager;
 import com.raph.mcp.MCPServerManager;
 import com.raph.plan.ExecutionPlan;
 import com.raph.render.Renderer;
+import com.raph.skill.Skill;
+import com.raph.skill.SkillRepository;
 import com.raph.tool.ToolRegistry;
 import org.jline.reader.LineReader;
 
@@ -52,7 +54,7 @@ public class TuiSession {
     }
 
     public void run() {
-        renderer.println("💡 提示: 输入 '/plan' 切换计划模式, '/team' 切换团队模式, '/mcp' 查看 MCP, '/hitl on|off' 切换人工审批, '/save <描述>' 保存记忆, '/clear' 清空历史, '/exit' 退出或返回普通模式\n");
+        renderer.println("💡 提示: 输入 '/plan' 切换计划模式, '/team' 切换团队模式, '/mcp' 查看 MCP, '/skills' 查看 skill, '/hitl on|off' 切换人工审批, '/save <描述>' 保存记忆, '/clear' 清空历史, '/exit' 退出或返回普通模式\n");
 
         while (true) {
             renderer.print(TuiStatusLine.contextBar(currentContextUsage()));
@@ -84,6 +86,7 @@ public class TuiSession {
             case PLAN -> switchMode(SessionMode.PLAN, "🧠 当前处于计划模式，输入任务目标后我将制定执行计划");
             case TEAM -> handleTeamCommand(command);
             case MCP -> handleMcpCommand(command.arguments());
+            case SKILLS -> handleSkillsCommand(command.arguments());
             case HITL -> handleHitlCommand(command.arguments());
             case SAVE -> saveMemory(command.arguments());
             case CLEAR -> clearHistory();
@@ -91,6 +94,50 @@ public class TuiSession {
             case UNKNOWN -> renderer.println("❌ 未知命令: " + command.rawInput() + "\n");
             case USER_INPUT -> {
             }
+        }
+    }
+
+    private void handleSkillsCommand(String arguments) {
+        String args = arguments == null ? "" : arguments.trim();
+        SkillRepository repository = SkillRepository.defaultRepository();
+        if (args.isEmpty()) {
+            StringBuilder sb = new StringBuilder("Skills:\n");
+            for (Skill skill : repository.all()) {
+                sb.append("- ").append(skill.id())
+                        .append(skill.description().isBlank() ? "" : " - " + skill.description())
+                        .append(" [").append(skill.source()).append("]\n");
+            }
+            renderer.println(sb.append("\n").toString());
+            return;
+        }
+
+        String[] parts = args.split("\\s+", 2);
+        String action = parts[0].toLowerCase(java.util.Locale.ROOT);
+        String id = parts.length > 1 ? parts[1].trim() : "";
+        switch (action) {
+            case "show" -> {
+                if (id.isEmpty()) {
+                    renderer.println("❌ 用法: /skills show <id>\n");
+                    return;
+                }
+                Skill skill = repository.find(id);
+                if (skill == null) {
+                    renderer.println("❌ 未找到 skill: " + id + "\n");
+                    return;
+                }
+                renderer.println("Skill: " + skill.id() + "\nsource=" + skill.source()
+                        + "\n\n" + skill.content() + "\n");
+            }
+            case "reload" -> {
+                SkillRepository reloaded = SkillRepository.reloadDefault();
+                renderer.println("✅ skills 已重新加载: " + reloaded.all().size() + "\n");
+            }
+            default -> renderer.println("""
+                    ❌ 用法:
+                    /skills
+                    /skills show <id>
+                    /skills reload
+                    """);
         }
     }
 

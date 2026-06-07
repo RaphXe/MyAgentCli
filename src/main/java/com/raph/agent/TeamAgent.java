@@ -1,11 +1,15 @@
 package com.raph.agent;
 
 import com.raph.llm.LlmClient;
+import com.raph.skill.SkillPrompts;
+import com.raph.skill.ToolSkillResolver;
 import com.raph.tool.ToolRegistry;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -20,6 +24,7 @@ public class TeamAgent {
     private final LlmClient client;
     private final ToolRegistry toolRegistry;
     private final List<LlmClient.Message> history = new ArrayList<>();
+    private final Set<Integer> injectedToolSkillPrompts = new HashSet<>();
     private int lastInputTokens;
     private int lastOutputTokens;
 
@@ -65,6 +70,10 @@ public class TeamAgent {
             lastInputTokens = response.inputTokens();
             lastOutputTokens = response.outputTokens();
             if (response.hasToolCalls()) {
+                String toolSkillPrompt = ToolSkillResolver.defaults().renderToolCallUsage(response.toolCalls());
+                if (injectToolSkillPrompt(toolSkillPrompt)) {
+                    continue;
+                }
                 stepObserver.onEvent("tool-iteration#" + iteration + " calls=" + summarizeToolCalls(response.toolCalls()));
                 history.add(LlmClient.Message.assistant(response.content(), response.toolCalls()));
                 for (ToolRegistry.ToolExecutionResult result : toolRegistry.executeTools(response.toolCalls())) {
@@ -151,7 +160,7 @@ public class TeamAgent {
     }
 
     private String systemPrompt() {
-        return """
+        return SkillPrompts.addendum("core/team-agent", """
                 你是一个自治 Multi-Agent 团队成员。你不会等待中心编排器分配每一步，而是根据 inbox、TaskBoard 和团队 transcript 主动决策。
 
                 通用规则：
@@ -188,6 +197,18 @@ public class TeamAgent {
                 18. 若你是 Reviewer，看到 READY_FOR_REVIEW 任务时主动审查并 approve/reject；APPROVED 即视为可交付，不必要求 owner 再 complete_task。Reviewer 可以使用只读工具审查产物，但不能写文件。
                 19. Reviewer 工具预算很小，最多约 4 轮工具调用。每次工具返回后都要根据剩余轮数重新规划：优先阅读提交 artifact、项目树和最关键的入口/核心文件；如果剩余轮数不足，不要继续扩大读取范围，而是基于已有证据给出 approve/reject 或带风险说明的 partial review。
                 20. Reviewer 不要在同一轮里批量读取大量文件。读取文件前先用 artifact/project_tree/list_dir 判断最小审查集合；通常只读取能改变审查结论的关键文件，例如 pom/build 配置、入口类、核心接口/状态机、被声明修改的文件。若任务是新项目或多文件交付，抽样审查关键链路即可，不要穷尽全项目。
-                """;
+                """);
+    }
+
+    private boolean injectToolSkillPrompt(String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return false;
+        }
+        int key = prompt.hashCode();
+        if (!injectedToolSkillPrompts.add(key)) {
+            return false;
+        }
+        history.add(LlmClient.Message.user(prompt));
+        return true;
     }
 }

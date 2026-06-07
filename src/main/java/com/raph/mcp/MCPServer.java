@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.raph.skill.ToolSkillResolver;
 import com.raph.tool.ToolRegistry;
 
 import java.time.Duration;
@@ -17,6 +18,7 @@ public class MCPServer implements AutoCloseable {
 
     private final MCPServerConfig config;
     private final JsonRPCClient client;
+    private final ToolSkillResolver skillResolver;
     private String protocolVersion = DEFAULT_PROTOCOL_VERSION;
 
     public MCPServer(MCPServerConfig config) {
@@ -26,6 +28,7 @@ public class MCPServer implements AutoCloseable {
     MCPServer(MCPServerConfig config, JsonRPCClient client) {
         this.config = config;
         this.client = client;
+        this.skillResolver = ToolSkillResolver.defaults();
     }
 
     public String name() {
@@ -47,9 +50,13 @@ public class MCPServer implements AutoCloseable {
         List<MCPTool> mcpTools = listTools();
         List<ToolRegistry.Tool> tools = new ArrayList<>();
         for (MCPTool mcpTool : mcpTools) {
+            ToolSkillResolver.registerToolSkillIds(
+                    mcpTool.localName(),
+                    ToolSkillResolver.skillIds(config.skills(), config.toolSkills(), mcpTool.originalName())
+            );
             tools.add(ToolRegistry.Tool.json(
                     mcpTool.localName(),
-                    mcpTool.description(),
+                    descriptionWithSkillUsage(mcpTool),
                     mcpTool.inputSchema(),
                     ToolRegistry.ToolMetadata.readOnly(),
                     args -> callToolAsString(mcpTool.originalName(), args)
@@ -113,6 +120,14 @@ public class MCPServer implements AutoCloseable {
         }
     }
 
+    private String descriptionWithSkillUsage(MCPTool mcpTool) {
+        String usage = skillResolver.renderMcpToolUsage(config, mcpTool.originalName());
+        if (usage == null || usage.isBlank()) {
+            return mcpTool.description();
+        }
+        return mcpTool.description() + "\n\n关联 skill:\n" + truncate(usage, 1200);
+    }
+
     private JsonNode callTool(String originalName, Map<String, JsonNode> args) throws MCPException {
         ObjectNode params = MAPPER.createObjectNode();
         params.put("name", originalName);
@@ -162,6 +177,13 @@ public class MCPServer implements AutoCloseable {
 
     private static String sanitize(String value) {
         return value == null ? "unknown" : value.trim().replaceAll("[^A-Za-z0-9_-]", "_");
+    }
+
+    private static String truncate(String value, int maxChars) {
+        if (value == null || value.length() <= maxChars) {
+            return value;
+        }
+        return value.substring(0, Math.max(0, maxChars - 3)) + "...";
     }
 
     private static String text(JsonNode node, String field, String defaultValue) {

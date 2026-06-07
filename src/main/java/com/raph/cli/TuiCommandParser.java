@@ -23,6 +23,7 @@ public final class TuiCommandParser {
             case "/plan" -> TuiCommand.Type.PLAN;
             case "/team" -> TuiCommand.Type.TEAM;
             case "/mcp" -> TuiCommand.Type.MCP;
+            case "/skills" -> TuiCommand.Type.SKILLS;
             case "/hitl" -> TuiCommand.Type.HITL;
             case "/save" -> TuiCommand.Type.SAVE;
             case "/clear" -> TuiCommand.Type.CLEAR;

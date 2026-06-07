@@ -71,6 +71,29 @@ class MCPServerTest {
         assertTrue(result.startsWith("[MCP ERROR] failed"));
     }
 
+    @Test
+    void appendsConfiguredSkillUsageToMcpToolDescription() throws Exception {
+        ScriptedTransport transport = new ScriptedTransport();
+        MCPServerConfig config = new MCPServerConfig(
+                "fake",
+                "stdio",
+                "unused",
+                List.of(),
+                Map.of(),
+                null,
+                Map.of(),
+                null,
+                List.of(),
+                Map.of("echo", List.of("core/agent"))
+        );
+        MCPServer server = new MCPServer(config, new JsonRPCClient(transport, Duration.ofSeconds(1)));
+
+        List<ToolRegistry.Tool> tools = server.initializeAndCreateTools();
+
+        assertTrue(tools.get(0).description().contains("关联 skill"), tools.get(0).description());
+        assertTrue(tools.get(0).description().contains("core/agent"), tools.get(0).description());
+    }
+
     private static final class ScriptedTransport implements MCPTransport {
         private final List<String> methods = new ArrayList<>();
         private final boolean toolError;

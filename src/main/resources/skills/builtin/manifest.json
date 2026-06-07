@@ -1,0 +1,9 @@
+{
+  "skills": [
+    "core/agent/SKILL.md",
+    "core/team-agent/SKILL.md",
+    "core/subagent/SKILL.md",
+    "plan/task/SKILL.md",
+    "tools/local-file-tools/SKILL.md"
+  ]
+}

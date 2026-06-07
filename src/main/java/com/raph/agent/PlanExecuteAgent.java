@@ -4,6 +4,8 @@ import com.raph.llm.LlmClient;
 import com.raph.plan.ExecutionPlan;
 import com.raph.plan.Planner;
 import com.raph.plan.Task;
+import com.raph.skill.SkillPrompts;
+import com.raph.skill.ToolSkillResolver;
 import com.raph.tool.ToolRegistry;
 import com.raph.render.Renderer;
 import com.raph.memory.ContextUsage;
@@ -178,6 +180,7 @@ public class PlanExecuteAgent {
         StringBuilder finalResult = new StringBuilder();
         Renderer.StreamHandle streamHandle = renderer == null ? null : renderer.contentStream("   🤖 ");
         int iteration = 0;
+        Set<Integer> injectedToolSkillPrompts = new HashSet<>();
 
         while (iteration < MAX_TOOL_ITERATIONS) {
             iteration++;
@@ -191,6 +194,13 @@ public class PlanExecuteAgent {
             lastOutputTokens = response.outputTokens();
 
             if (response.hasToolCalls()) {
+                String toolSkillPrompt = ToolSkillResolver.defaults().renderToolCallUsage(response.toolCalls());
+                if (injectToolSkillPrompt(messages, injectedToolSkillPrompts, toolSkillPrompt)) {
+                    if (streamHandle != null) {
+                        streamHandle.finish();
+                    }
+                    continue;
+                }
                 if (streamHandle != null) {
                     streamHandle.finish();
                 }
@@ -265,7 +275,20 @@ public class PlanExecuteAgent {
                     """;
         };
 
-        return basePrompt + "\n请专注于当前任务，完成任务后返回结果，不要调用不必要的工具。";
+        return SkillPrompts.addendum("plan/task",
+                basePrompt + "\n请专注于当前任务，完成任务后返回结果，不要调用不必要的工具。");
+    }
+
+    private boolean injectToolSkillPrompt(List<LlmClient.Message> messages, Set<Integer> injected, String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return false;
+        }
+        int key = prompt.hashCode();
+        if (!injected.add(key)) {
+            return false;
+        }
+        messages.add(LlmClient.Message.user(prompt));
+        return true;
     }
 
     private static void append(StringBuilder output, Renderer renderer, String text) {

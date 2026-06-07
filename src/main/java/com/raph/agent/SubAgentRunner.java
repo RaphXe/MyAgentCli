@@ -3,6 +3,8 @@ package com.raph.agent;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.raph.llm.LlmClient;
+import com.raph.skill.SkillPrompts;
+import com.raph.skill.ToolSkillResolver;
 import com.raph.tool.ToolRegistry;
 
 import java.io.IOException;
@@ -47,6 +49,7 @@ public class SubAgentRunner {
         String mode = normalizeMode(safeRequest.mode());
         List<String> allowedTools = allowedTools(safeRequest.allowedTools(), mode);
         RunStats stats = new RunStats();
+        Set<Integer> injectedToolSkillPrompts = new LinkedHashSet<>();
 
         List<LlmClient.Message> messages = new ArrayList<>();
         messages.add(LlmClient.Message.system(systemPrompt(safeRequest.role(), mode, allowedTools)));
@@ -60,6 +63,10 @@ public class SubAgentRunner {
                     LlmClient.StreamListener.NO_OP
             );
             if (response.hasToolCalls()) {
+                String toolSkillPrompt = ToolSkillResolver.defaults().renderToolCallUsage(response.toolCalls());
+                if (injectToolSkillPrompt(messages, injectedToolSkillPrompts, toolSkillPrompt)) {
+                    continue;
+                }
                 stats.recordToolIteration(response.toolCalls());
                 safeObserver.onEvent("tool-iteration#" + stats.toolIterations()
                         + " calls=" + stats.latestToolCalls());
@@ -124,7 +131,7 @@ public class SubAgentRunner {
                 B. 不允许修改文件、创建项目、执行命令、改变 Git 状态或绕过父 Agent 权限。
                 C. 如果你的角色是 Coder 子Agent，只能输出 proposed_changes 形式的 patch plan：file、intent、patch_hint、risks。不要调用或建议直接执行 write_file。
                 """;
-        return """
+        return SkillPrompts.addendum("core/subagent", """
                 你是一个由父 Agent 临时创建的受限子 Agent。
 
                 你的角色：%s
@@ -142,7 +149,19 @@ public class SubAgentRunner {
                 8. 必须只输出 JSON 对象，不要输出 Markdown。格式：
                    {"status":"complete|incomplete","summary":"...","findings":["..."],"files_read":["..."],"files_written":["..."],"risks":["..."],"recommendations":["..."],"proposed_changes":[{"file":"...","intent":"...","patch_hint":"..."}],"confidence":0.0}
                 9. 如果信息不足，明确说明缺口和建议父Agent如何补充，不要猜测，也不要继续无边界探索。
-                """.formatted(normalizedRole, mode, allowedTools, MAX_TOOL_ITERATIONS, modeRules);
+                """.formatted(normalizedRole, mode, allowedTools, MAX_TOOL_ITERATIONS, modeRules));
+    }
+
+    private boolean injectToolSkillPrompt(List<LlmClient.Message> messages, Set<Integer> injected, String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return false;
+        }
+        int key = prompt.hashCode();
+        if (!injected.add(key)) {
+            return false;
+        }
+        messages.add(LlmClient.Message.user(prompt));
+        return true;
     }
 
     private String userPrompt(Request request) {

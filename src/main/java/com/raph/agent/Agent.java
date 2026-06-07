@@ -5,11 +5,15 @@ import com.raph.llm.LlmClient;
 import com.raph.llm.LlmClient.*;
 import com.raph.memory.ContextWindowConfig;
 import com.raph.memory.MemoryManager;
+import com.raph.skill.SkillPrompts;
+import com.raph.skill.ToolSkillResolver;
 import com.raph.tool.ToolRegistry;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class Agent {
     private final LlmClient client;
@@ -21,6 +25,7 @@ public class Agent {
     private int lastOutputTokens = 0;
     private int currentContextTokens = 0;
     private final int maxContextTokens;
+    private final Set<Integer> injectedToolSkillPrompts = new HashSet<>();
 
     public Agent(String apikey) {
         this(new DeepSeekClient(apikey), null);
@@ -37,7 +42,7 @@ public class Agent {
         this.memoryManager = memoryManager;
         this.maxContextTokens = loadMaxContextTokens();
 
-        this.conversationHistory.add(Message.system(SYSTEM_PROMPT));
+        this.conversationHistory.add(Message.system(systemPrompt()));
         this.currentContextTokens = estimateSystemPromptTokens();
     }
 
@@ -77,6 +82,10 @@ public class Agent {
             }
 
             if (response.hasToolCalls()) {
+                String toolSkillPrompt = ToolSkillResolver.defaults().renderToolCallUsage(response.toolCalls());
+                if (injectToolSkillPrompt(toolSkillPrompt)) {
+                    continue;
+                }
                 conversationHistory.add(
                         Message.assistant(response.content(), response.toolCalls())
                 );
@@ -103,15 +112,15 @@ public class Agent {
 
         String memoryContext = memoryManager.enrichSystemPrompt(userInput);
         String enriched = memoryContext != null && !memoryContext.isEmpty()
-                ? SYSTEM_PROMPT + memoryContext
-                : SYSTEM_PROMPT;
+                ? systemPrompt() + memoryContext
+                : systemPrompt();
 
         if (!conversationHistory.isEmpty() && "system".equals(conversationHistory.get(0).role())) {
             conversationHistory.set(0, Message.system(enriched));
         }
     }
 
-    private static final String SYSTEM_PROMPT = """
+    private static final String FALLBACK_SYSTEM_PROMPT = """
     你是一个智能编程助手，可以帮助用户完成各种任务。
 
     你可以使用以下工具来完成任务：
@@ -129,7 +138,8 @@ public class Agent {
 
     public void clearHistory() {
         conversationHistory.clear();
-        conversationHistory.add(Message.system(SYSTEM_PROMPT));
+        injectedToolSkillPrompts.clear();
+        conversationHistory.add(Message.system(systemPrompt()));
         currentContextTokens = estimateSystemPromptTokens();
         lastInputTokens = 0;
         lastOutputTokens = 0;
@@ -164,10 +174,26 @@ public class Agent {
     }
 
     private int estimateSystemPromptTokens() {
-        return (int) Math.ceil(SYSTEM_PROMPT.length() / 3.5);
+        return (int) Math.ceil(systemPrompt().length() / 3.5);
     }
 
     private static int loadMaxContextTokens() {
         return ContextWindowConfig.loadMaxContextTokens();
+    }
+
+    private static String systemPrompt() {
+        return SkillPrompts.system("core/agent", FALLBACK_SYSTEM_PROMPT);
+    }
+
+    private boolean injectToolSkillPrompt(String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return false;
+        }
+        int key = prompt.hashCode();
+        if (!injectedToolSkillPrompts.add(key)) {
+            return false;
+        }
+        conversationHistory.add(Message.user(prompt));
+        return true;
     }
 }

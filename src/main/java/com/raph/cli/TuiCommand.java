@@ -6,6 +6,7 @@ public record TuiCommand(Type type, String arguments, String rawInput) {
         PLAN,
         TEAM,
         MCP,
+        SKILLS,
         HITL,
         SAVE,
         CLEAR,

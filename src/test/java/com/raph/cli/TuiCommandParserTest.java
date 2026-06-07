@@ -30,6 +30,14 @@ class TuiCommandParserTest {
     }
 
     @Test
+    void skillsCommandParsesArguments() {
+        TuiCommand command = TuiCommandParser.parse("/skills show core/agent");
+
+        assertEquals(TuiCommand.Type.SKILLS, command.type());
+        assertEquals("show core/agent", command.arguments());
+    }
+
+    @Test
     void renamedClearAndExitCommandsRequireSlash() {
         assertEquals(TuiCommand.Type.CLEAR, TuiCommandParser.parse("/clear").type());
         assertEquals(TuiCommand.Type.EXIT, TuiCommandParser.parse("/exit").type());
