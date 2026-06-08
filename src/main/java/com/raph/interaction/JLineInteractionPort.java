@@ -19,8 +19,16 @@ public class JLineInteractionPort implements InteractionPort {
 
     @Override
     public String readLine(String prompt) throws InteractionException {
+        return readLine(prompt, null);
+    }
+
+    @Override
+    public String readLine(String prompt, String rightPrompt) throws InteractionException {
         try {
-            return reader.readLine(prompt == null ? "" : prompt);
+            if (rightPrompt == null || rightPrompt.isBlank()) {
+                return reader.readLine(prompt == null ? "" : prompt);
+            }
+            return reader.readLine(prompt == null ? "" : prompt, rightPrompt, (Character) null, null);
         } catch (UserInterruptException e) {
             throw new InteractionException(InteractionException.Type.INTERRUPTED, "用户取消输入", e);
         } catch (EndOfFileException e) {

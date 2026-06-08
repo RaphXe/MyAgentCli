@@ -233,18 +233,23 @@ public class PlanExecuteAgent {
                 messages.add(LlmClient.Message.assistant(
                         response.getContent(), response.toolCalls()));
 
+                boolean toolCallsRendered = streamHandle != null && streamHandle.onToolCalls(response.toolCalls());
                 for (LlmClient.ToolCall toolCall : response.toolCalls()) {
-                    if (renderer != null) {
+                    if (!toolCallsRendered && renderer != null) {
                         renderer.emit(RenderEvent.toolStarted("plan:" + task.getId(), toolCall.function().name()));
                     }
-                    emit(renderer, "   🔧 调用工具: " + toolCall.function().name() + "\n");
+                    if (!toolCallsRendered) {
+                        emit(renderer, "   🔧 调用工具: " + toolCall.function().name() + "\n");
+                    }
                 }
                 for (ToolRegistry.ToolExecutionResult result : toolRegistry.executeTools(response.toolCalls())) {
                     messages.add(LlmClient.Message.tool(result.toolCallId(), result.result()));
-                    if (renderer != null) {
+                    if (!toolCallsRendered && renderer != null) {
                         renderer.emit(RenderEvent.toolFinished("plan:" + task.getId(), result.toolName()));
                     }
-                    emit(renderer, "   ↳ 工具完成\n");
+                    if (!toolCallsRendered) {
+                        emit(renderer, "   ↳ 工具完成\n");
+                    }
                 }
             } else {
                 if (streamHandle != null) {

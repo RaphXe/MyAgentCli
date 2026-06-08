@@ -14,7 +14,7 @@ public final class CliConfig {
     private static final int DEFAULT_OUTPUT_TRUNCATE_LIMIT = 2000;
     private static final String DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
     private static final String DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
-    private static final String DEFAULT_TUI_MODE = "light";
+    private static final String DEFAULT_TUI_MODE = "inline";
 
     private final LlmConfig llmConfig;
     private final int outputTruncateLimit;
@@ -51,7 +51,11 @@ public final class CliConfig {
     }
 
     public boolean lightTuiEnabled() {
-        return !"plain".equalsIgnoreCase(tuiMode);
+        return "light".equalsIgnoreCase(tuiMode);
+    }
+
+    public boolean inlineTuiEnabled() {
+        return "inline".equalsIgnoreCase(tuiMode);
     }
 
     private static String loadTuiMode() {
@@ -60,7 +64,12 @@ public final class CliConfig {
             return DEFAULT_TUI_MODE;
         }
         String normalized = value.trim().toLowerCase(java.util.Locale.ROOT);
-        return "plain".equals(normalized) ? "plain" : DEFAULT_TUI_MODE;
+        return switch (normalized) {
+            case "plain" -> "plain";
+            case "light" -> "light";
+            case "inline" -> "inline";
+            default -> DEFAULT_TUI_MODE;
+        };
     }
 
     private static int loadOutputTruncateLimit() {

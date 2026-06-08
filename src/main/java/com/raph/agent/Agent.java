@@ -86,6 +86,12 @@ public class Agent {
                 if (injectToolSkillPrompt(toolSkillPrompt)) {
                     continue;
                 }
+                if (streamListener instanceof com.raph.render.Renderer.StreamHandle streamHandle) {
+                    if (streamHandle.hasContent()) {
+                        streamHandle.finish();
+                    }
+                    streamHandle.onToolCalls(response.toolCalls());
+                }
                 conversationHistory.add(
                         Message.assistant(response.content(), response.toolCalls())
                 );

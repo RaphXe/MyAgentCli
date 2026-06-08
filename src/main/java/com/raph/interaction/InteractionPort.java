@@ -6,6 +6,10 @@ package com.raph.interaction;
 public interface InteractionPort {
     String readLine(String prompt) throws InteractionException;
 
+    default String readLine(String prompt, String rightPrompt) throws InteractionException {
+        return readLine(prompt);
+    }
+
     String readSecret(String prompt) throws InteractionException;
 
     void print(String text);

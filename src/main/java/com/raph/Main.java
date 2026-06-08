@@ -15,6 +15,7 @@ import com.raph.mcp.MCPServerManager;
 import com.raph.render.LightTuiRenderer;
 import com.raph.render.PlainRenderer;
 import com.raph.render.Renderer;
+import com.raph.render.inline.InlineRenderer;
 import com.raph.tool.ToolRegistry;
 
 import java.io.IOException;
@@ -22,6 +23,8 @@ import java.nio.charset.StandardCharsets;
 
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
+import org.jline.reader.Reference;
+import org.jline.keymap.KeyMap;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
@@ -53,9 +56,11 @@ public class Main {
             return;
         }
 
-        Renderer renderer = config.lightTuiEnabled()
-                ? new LightTuiRenderer(System.out, terminal::getWidth)
-                : new PlainRenderer(System.out);
+        Renderer renderer = createRenderer(config, terminal);
+        if (renderer instanceof InlineRenderer inlineRenderer) {
+            inlineRenderer.bindLineReader(reader);
+            bindCtrlOToFoldableBlocks(reader, inlineRenderer);
+        }
         renderer.start();
 
         InteractionPort interaction = new JLineInteractionPort(reader, renderer);
@@ -78,6 +83,36 @@ public class Main {
                     memoryManager, mcpServerManager, agent, planAgent).run();
         } finally {
             mcpServerManager.close();
+            renderer.close();
+        }
+    }
+
+    private static Renderer createRenderer(CliConfig config, Terminal terminal) {
+        if (config.inlineTuiEnabled()) {
+            return new InlineRenderer(terminal);
+        }
+        if (config.lightTuiEnabled()) {
+            return new LightTuiRenderer(System.out, terminal::getWidth);
+        }
+        return new PlainRenderer(System.out);
+    }
+
+    private static void bindCtrlOToFoldableBlocks(LineReader reader, InlineRenderer renderer) {
+        if (reader == null || renderer == null) {
+            return;
+        }
+        reader.getWidgets().put("paicli-toggle-foldable", () -> {
+            renderer.toggleLastBlock();
+            reader.callWidget(LineReader.REDISPLAY);
+            return true;
+        });
+        Reference reference = new Reference("paicli-toggle-foldable");
+        String ctrlO = String.valueOf((char) 15);
+        for (String mapName : new String[]{LineReader.MAIN, LineReader.EMACS, LineReader.VIINS}) {
+            KeyMap<org.jline.reader.Binding> keyMap = reader.getKeyMaps().get(mapName);
+            if (keyMap != null) {
+                keyMap.bind(reference, ctrlO);
+            }
         }
     }
 

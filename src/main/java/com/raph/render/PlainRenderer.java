@@ -1,6 +1,7 @@
 package com.raph.render;
 
 import java.io.PrintStream;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 /** 普通终端渲染器：直接写入 PrintStream。 */
@@ -58,6 +59,7 @@ public class PlainRenderer implements Renderer {
         private int printedChars;
         private boolean contentStarted;
         private boolean truncated;
+        private boolean thinkingStarted;
 
         private PlainStreamHandle(Renderer renderer, String scope, String prefix, int maxChars) {
             this.renderer = renderer;
@@ -68,9 +70,25 @@ public class PlainRenderer implements Renderer {
         }
 
         @Override
+        public synchronized void onReasoningDelta(String delta) {
+            if (delta == null || delta.isEmpty() || !renderer.supportsThinkingPanel()) {
+                return;
+            }
+            if (!thinkingStarted) {
+                renderer.beginThinking("Thinking");
+                thinkingStarted = true;
+            }
+            renderer.appendThinking(delta);
+        }
+
+        @Override
         public synchronized void onContentDelta(String delta) {
             if (delta == null || delta.isEmpty() || truncated) {
                 return;
+            }
+            if (thinkingStarted) {
+                renderer.endThinking();
+                thinkingStarted = false;
             }
             if (!contentStarted) {
                 renderer.emit(RenderEvent.streamStart(scope, streamId, prefix));
@@ -102,10 +120,23 @@ public class PlainRenderer implements Renderer {
         }
 
         @Override
+        public synchronized boolean onToolCalls(List<com.raph.llm.LlmClient.ToolCall> toolCalls) {
+            if (thinkingStarted) {
+                renderer.endThinking();
+                thinkingStarted = false;
+            }
+            return renderer.appendToolCalls(toolCalls);
+        }
+
+        @Override
         public synchronized void finish() {
             if (contentStarted) {
                 renderer.emit(RenderEvent.streamEnd(scope, streamId));
                 contentStarted = false;
+            }
+            if (thinkingStarted) {
+                renderer.endThinking();
+                thinkingStarted = false;
             }
         }
     }

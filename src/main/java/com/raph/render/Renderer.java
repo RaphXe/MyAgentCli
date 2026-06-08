@@ -3,6 +3,7 @@ package com.raph.render;
 import com.raph.llm.LlmClient;
 
 import java.io.PrintStream;
+import java.util.List;
 
 /**
  * CLI 输出渲染抽象。
@@ -12,6 +13,36 @@ import java.io.PrintStream;
  */
 public interface Renderer extends AutoCloseable {
     default void start() {
+    }
+
+    default void beginTurn() {
+    }
+
+    default void beforeInput() {
+    }
+
+    default void afterInput() {
+    }
+
+    default String inputPrompt(String fallbackPrompt) {
+        return fallbackPrompt == null ? "" : fallbackPrompt;
+    }
+
+    default String inputRightPrompt() {
+        return null;
+    }
+
+    default boolean supportsThinkingPanel() {
+        return false;
+    }
+
+    default void beginThinking(String label) {
+    }
+
+    default void appendThinking(String delta) {
+    }
+
+    default void endThinking() {
     }
 
     PrintStream stream();
@@ -44,12 +75,20 @@ public interface Renderer extends AutoCloseable {
 
     StreamHandle previewStream(String prefix, int maxChars);
 
+    default boolean appendToolCalls(List<LlmClient.ToolCall> toolCalls) {
+        return false;
+    }
+
     @Override
     default void close() {
     }
 
     interface StreamHandle extends LlmClient.StreamListener {
         boolean hasContent();
+
+        default boolean onToolCalls(List<LlmClient.ToolCall> toolCalls) {
+            return false;
+        }
 
         void finish();
     }

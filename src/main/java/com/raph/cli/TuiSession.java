@@ -17,6 +17,7 @@ import com.raph.render.LightTuiRenderer;
 import com.raph.render.RenderEvent;
 import com.raph.render.Renderer;
 import com.raph.render.ViewAwareRenderer;
+import com.raph.render.inline.InlineRenderer;
 import com.raph.skill.Skill;
 import com.raph.skill.SkillRepository;
 import com.raph.tool.ToolRegistry;
@@ -76,7 +77,8 @@ public class TuiSession {
 
             String line;
             try {
-                line = interaction.readLine(mode.prompt());
+                renderer.beforeInput();
+                line = interaction.readLine(renderer.inputPrompt(mode.prompt()), renderer.inputRightPrompt());
             } catch (InteractionException e) {
                 if (e.type() == InteractionException.Type.INTERRUPTED) {
                     renderer.println("\n已取消当前输入。输入 /exit 可退出。\n");
@@ -84,6 +86,8 @@ public class TuiSession {
                 }
                 renderer.println("\n输入流已关闭，正在退出。\n");
                 break;
+            } finally {
+                renderer.afterInput();
             }
             if (line == null) {
                 renderer.println("\n输入流已关闭，正在退出。\n");
@@ -463,6 +467,7 @@ public class TuiSession {
     }
 
     private void handleNormalInput(String input) {
+        renderer.beginTurn();
         renderer.emit(RenderEvent.activity("agent", "🤔 思考中..."));
         String response;
         Renderer.StreamHandle streamRenderer = renderer.contentStream("🤖 Agent: ");
@@ -637,6 +642,9 @@ public class TuiSession {
     }
 
     private void clearHistory() {
+        if (renderer instanceof InlineRenderer inlineRenderer) {
+            inlineRenderer.clearBlocks();
+        }
         switch (mode) {
             case NORMAL -> {
                 agent.clearHistory();
@@ -678,6 +686,7 @@ public class TuiSession {
             renderer.println("❌ 用法: /team <任务内容>\n");
             return;
         }
+        renderer.beginTurn();
         renderer.println("👥 启动自治 Multi-Agent 协作...\n");
         try {
             String response = teamRuntime().run(teamTask);
@@ -709,6 +718,7 @@ public class TuiSession {
     }
 
     private void handlePlanInput(String input) {
+        renderer.beginTurn();
         renderer.emit(RenderEvent.activity("plan", "🤔 规划中..."));
         try {
             ExecutionPlan plan = planAgent.createPlan(input);
