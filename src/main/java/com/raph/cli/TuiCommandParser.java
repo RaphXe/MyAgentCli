@@ -20,6 +20,12 @@ public final class TuiCommandParser {
         String arguments = separator < 0 ? "" : trimmed.substring(separator + 1).trim();
 
         TuiCommand.Type type = switch (commandName.toLowerCase(Locale.ROOT)) {
+            case "/help", "/?" -> TuiCommand.Type.HELP;
+            case "/status" -> TuiCommand.Type.STATUS;
+            case "/tools" -> TuiCommand.Type.TOOLS;
+            case "/logs" -> TuiCommand.Type.LOGS;
+            case "/theme" -> TuiCommand.Type.THEME;
+            case "/compact" -> TuiCommand.Type.COMPACT;
             case "/plan" -> TuiCommand.Type.PLAN;
             case "/team" -> TuiCommand.Type.TEAM;
             case "/mcp" -> TuiCommand.Type.MCP;

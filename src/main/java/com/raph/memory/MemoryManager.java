@@ -66,20 +66,7 @@ public class MemoryManager {
 
     public void beforeChat(Agent agent) {
         if (tokenBudget.needsCompression()) {
-            List<LlmClient.Message> conversation = agent.getConversationHistory();
-            try {
-                ContextCompressor.CompressResult result = contextCompressor.compress(conversation, llmClient);
-                if (result.performed()) {
-                    int cutoff = result.removedCount();
-                    while (conversation.size() > cutoff) {
-                        conversation.remove(0);
-                    }
-                    conversation.add(0, result.summaryMessage());
-                    tokenBudget.updateCompressedHistoryTokens(result.estimatedCompressedTokens());
-                }
-            } catch (IOException e) {
-                lastWarning = "上下文压缩失败: " + e.getMessage();
-            }
+            tryCompact(agent);
         }
     }
 
@@ -91,6 +78,19 @@ public class MemoryManager {
         lastInjectedContext = "";
         lastWarning = null;
         tokenBudget.reset();
+    }
+
+    public CompactResult compactConversation(Agent agent) throws IOException {
+        if (agent == null) {
+            return new CompactResult(false, 0, 0, "当前没有可压缩的 Agent 会话");
+        }
+        ContextCompressor.CompressResult result = compact(agent);
+        if (!result.performed()) {
+            return new CompactResult(false, 0, 0, "当前对话太短，暂无可压缩历史");
+        }
+        return new CompactResult(true, result.removedCount(), result.estimatedCompressedTokens(),
+                "已压缩 " + result.removedCount() + " 条历史消息，摘要约 "
+                        + result.estimatedCompressedTokens() + " tokens");
     }
 
     public SaveMemoryResult saveToMemory(String description, Agent agent) throws IOException {
@@ -136,6 +136,30 @@ public class MemoryManager {
     private int estimateTokens(String text) {
         return text == null ? 0 : (int) Math.ceil(text.length() / 3.5);
     }
+
+    private void tryCompact(Agent agent) {
+        try {
+            compact(agent);
+        } catch (IOException e) {
+            lastWarning = "上下文压缩失败: " + e.getMessage();
+        }
+    }
+
+    private ContextCompressor.CompressResult compact(Agent agent) throws IOException {
+        List<LlmClient.Message> conversation = agent.getConversationHistory();
+        ContextCompressor.CompressResult result = contextCompressor.compress(conversation, llmClient);
+        if (result.performed()) {
+            int cutoff = result.removedCount();
+            while (conversation.size() > cutoff) {
+                conversation.remove(0);
+            }
+            conversation.add(0, result.summaryMessage());
+            tokenBudget.updateCompressedHistoryTokens(result.estimatedCompressedTokens());
+        }
+        return result;
+    }
+
+    public record CompactResult(boolean compacted, int removedMessages, int compressedTokens, String message) {}
 
     public record SaveMemoryResult(boolean saved, MemoryEntry entry, java.nio.file.Path storagePath,
                                    int totalCount, String message) {

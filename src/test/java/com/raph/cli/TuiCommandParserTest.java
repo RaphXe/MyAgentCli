@@ -63,4 +63,17 @@ class TuiCommandParserTest {
         assertEquals(TuiCommand.Type.CONNECT, TuiCommandParser.parse("/connect https://api.example.com/v1").type());
         assertEquals(TuiCommand.Type.MODEL, TuiCommandParser.parse("/model").type());
     }
+
+    @Test
+    void productCommandsParseArguments() {
+        assertEquals(TuiCommand.Type.HELP, TuiCommandParser.parse("/help tools").type());
+        assertEquals("tools", TuiCommandParser.parse("/help tools").arguments());
+        assertEquals(TuiCommand.Type.HELP, TuiCommandParser.parse("/?").type());
+        assertEquals(TuiCommand.Type.STATUS, TuiCommandParser.parse("/status").type());
+        assertEquals(TuiCommand.Type.TOOLS, TuiCommandParser.parse("/tools write").type());
+        assertEquals("write", TuiCommandParser.parse("/tools write").arguments());
+        assertEquals(TuiCommand.Type.LOGS, TuiCommandParser.parse("/logs tools 5").type());
+        assertEquals(TuiCommand.Type.THEME, TuiCommandParser.parse("/theme compact").type());
+        assertEquals(TuiCommand.Type.COMPACT, TuiCommandParser.parse("/compact").type());
+    }
 }

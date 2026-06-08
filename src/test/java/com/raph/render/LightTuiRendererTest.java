@@ -53,6 +53,27 @@ class LightTuiRendererTest {
     }
 
     @Test
+    void compactThemeHidesSecondaryStatusDetails() {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        LightTuiRenderer renderer = new LightTuiRenderer(
+                new PrintStream(out, true, StandardCharsets.UTF_8),
+                () -> 72
+        );
+
+        assertTrue(renderer.setTheme("compact"));
+        renderer.updatePlanView(new com.raph.plan.PlanView(
+                "plan-1", "目标", "摘要", "RUNNING",
+                java.util.List.of(), java.util.List.of(),
+                2, 1, 0, 1, 0, 0, 0
+        ));
+        renderer.emit(RenderEvent.status("普通模式 [====] 10/100 10.0%"));
+
+        String text = out.toString(StandardCharsets.UTF_8);
+        assertTrue(text.contains("普通模式"), text);
+        org.junit.jupiter.api.Assertions.assertFalse(text.contains("Plan RUNNING"), text);
+    }
+
+    @Test
     void teamLogWrapsLongMultilineSummariesAndStripsNestedFramePrefixes() {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         LightTuiRenderer renderer = new LightTuiRenderer(

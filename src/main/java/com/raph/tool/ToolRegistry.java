@@ -443,6 +443,40 @@ public class ToolRegistry {
                 .toList();
     }
 
+    public synchronized List<ToolSummary> toolSummaries() {
+        return tools.values().stream()
+                .map(tool -> {
+                    ToolMetadata metadata = tool.metadata();
+                    return new ToolSummary(
+                            tool.name(),
+                            displayDescription(tool.description()),
+                            metadata == null ? "" : metadata.dangerLevel(),
+                            metadata != null && metadata.requiresApproval(),
+                            metadata != null && metadata.mutatesFile(),
+                            metadata != null && metadata.unknownRisk(),
+                            metadata == null ? "" : metadata.riskDescription()
+                    );
+                })
+                .sorted(Comparator.comparing(ToolSummary::name))
+                .toList();
+    }
+
+    private static String displayDescription(String description) {
+        if (description == null || description.isBlank()) {
+            return "";
+        }
+        String normalized = description.replace("\r\n", "\n").replace('\r', '\n');
+        int skillIndex = normalized.indexOf("\n\n关联 skill:");
+        if (skillIndex >= 0) {
+            normalized = normalized.substring(0, skillIndex);
+        }
+        return normalized.lines()
+                .filter(line -> !line.stripLeading().startsWith("关联 skill:"))
+                .findFirst()
+                .orElse("")
+                .trim();
+    }
+
     public String executeTool(String toolName, String arguments) {
         return executeTool(toolName, arguments, TOOL_CALLING_SEQUENCE.incrementAndGet(), false);
     }
@@ -1081,6 +1115,14 @@ public class ToolRegistry {
                                  String argumentsSummary,
                                  long elapsedMillis,
                                  String resultSummary) {}
+
+    public record ToolSummary(String name,
+                              String description,
+                              String dangerLevel,
+                              boolean requiresApproval,
+                              boolean mutatesFile,
+                              boolean unknownRisk,
+                              String riskDescription) {}
 
     private record FileMutationOwner(long toolCallingId, String owner) {}
 

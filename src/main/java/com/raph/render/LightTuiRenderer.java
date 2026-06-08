@@ -24,6 +24,12 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
     private String lastStatus = "";
     private PlanView planView;
     private TeamView teamView;
+    private Theme theme = Theme.LIGHT;
+
+    public enum Theme {
+        LIGHT,
+        COMPACT
+    }
 
     public LightTuiRenderer(PrintStream out) {
         this(out, () -> DEFAULT_WIDTH);
@@ -72,6 +78,30 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
         this.teamView = view;
     }
 
+    public synchronized Theme theme() {
+        return theme;
+    }
+
+    public synchronized boolean setTheme(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String normalized = value.trim().toLowerCase(java.util.Locale.ROOT);
+        switch (normalized) {
+            case "light", "default", "spacious" -> {
+                theme = Theme.LIGHT;
+                return true;
+            }
+            case "compact", "dense" -> {
+                theme = Theme.COMPACT;
+                return true;
+            }
+            default -> {
+                return false;
+            }
+        }
+    }
+
     private void drawHeader() {
         int width = width();
         out.println("┌" + repeat("─", width - 2) + "┐");
@@ -85,6 +115,11 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
         int width = width();
         out.println("┌─ Status " + repeat("─", Math.max(0, width - 11)) + "┐");
         printBoxLines(" " + lastStatus, width);
+        if (theme == Theme.COMPACT) {
+            out.println("└" + repeat("─", width - 2) + "┘");
+            out.flush();
+            return;
+        }
         if (planView != null && !planView.id().isBlank()) {
             printBoxLines(" Plan " + planView.status() + " tasks "
                     + planView.completedTasks() + "/" + planView.totalTasks()
