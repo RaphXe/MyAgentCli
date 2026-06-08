@@ -1,12 +1,12 @@
 package com.raph.hitl;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.raph.interaction.InteractionException;
+import com.raph.interaction.InteractionPort;
+import com.raph.interaction.StreamInteractionPort;
 
 import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.PrintStream;
-import java.nio.charset.StandardCharsets;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -19,17 +19,19 @@ public class TerminalHitlHandler implements HitlHandler {
     private volatile boolean enabled;
     private final Set<String> approvedAllByTool = ConcurrentHashMap.newKeySet();
     private final Set<String> approvedAllByServer = ConcurrentHashMap.newKeySet();
-    private final BufferedReader in;
-    private final PrintStream out;
+    private final InteractionPort interaction;
 
     public TerminalHitlHandler(boolean enabled) {
-        this(enabled, new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)), System.out);
+        this(enabled, new StreamInteractionPort());
+    }
+
+    public TerminalHitlHandler(boolean enabled, InteractionPort interaction) {
+        this.enabled = enabled;
+        this.interaction = interaction == null ? new StreamInteractionPort() : interaction;
     }
 
     TerminalHitlHandler(boolean enabled, BufferedReader in, PrintStream out) {
-        this.enabled = enabled;
-        this.in = in;
-        this.out = out == null ? System.out : out;
+        this(enabled, new StreamInteractionPort(in, out));
     }
 
     @Override
@@ -46,85 +48,85 @@ public class TerminalHitlHandler implements HitlHandler {
     public synchronized ApprovalResult requestApproval(ApprovalRequest request) {
         String mcpServer = ApprovalPolicy.mcpServerName(request.toolName());
         if (isApprovedAllByTool(request.toolName())) {
-            out.println("  [HITL] " + request.toolName() + " 已在本次会话中全部放行，自动通过");
+            interaction.println("  [HITL] " + request.toolName() + " 已在本次会话中全部放行，自动通过");
             return ApprovalResult.approveAll();
         }
         if (isApprovedAllByServer(mcpServer)) {
-            out.println("  [HITL] MCP server " + mcpServer + " 已在本次会话中全部放行，自动通过");
+            interaction.println("  [HITL] MCP server " + mcpServer + " 已在本次会话中全部放行，自动通过");
             return ApprovalResult.approveAllByServer();
         }
 
-        out.println();
-        out.println("────────── ⚠️  HITL 审批请求 ──────────");
-        out.println(request.toDisplayText());
+        interaction.println("");
+        interaction.println("────────── ⚠️  HITL 审批请求 ──────────");
+        interaction.println(request.toDisplayText());
         return promptUntilDecision(request);
     }
 
     private ApprovalResult promptUntilDecision(ApprovalRequest request) {
         for (int attempt = 0; attempt < 5; attempt++) {
-            out.println();
+            interaction.println("");
             if (request.workspaceApprovalRequired()) {
                 if (ApprovalPolicy.requiresApproval(request.toolName())) {
-                    out.println("请选择操作：[y/Enter] 批准本次  [w] 扩展工作区（仅当前会话）  [wa] 扩展工作区并全部放行本工具  [a] 全部放行危险工具  [n] 拒绝  [s] 跳过  [m] 修改参数");
+                    interaction.println("请选择操作：[y/Enter] 批准本次  [w] 扩展工作区（仅当前会话）  [wa] 扩展工作区并全部放行本工具  [a] 全部放行危险工具  [n] 拒绝  [s] 跳过  [m] 修改参数");
                 } else {
-                    out.println("请选择操作：[y/Enter] 批准本次  [w] 扩展工作区（仅当前会话）  [n] 拒绝  [s] 跳过  [m] 修改参数");
+                    interaction.println("请选择操作：[y/Enter] 批准本次  [w] 扩展工作区（仅当前会话）  [n] 拒绝  [s] 跳过  [m] 修改参数");
                 }
             } else {
-                out.println("请选择操作：[y/Enter] 批准  [a] 全部放行  [n] 拒绝  [s] 跳过  [m] 修改参数");
+                interaction.println("请选择操作：[y/Enter] 批准  [a] 全部放行  [n] 拒绝  [s] 跳过  [m] 修改参数");
             }
-            out.print("> ");
-            out.flush();
 
             String input;
             try {
-                input = in.readLine();
-            } catch (IOException e) {
-                out.println("  [HITL] 读取用户输入失败，保守处理为拒绝");
+                input = interaction.readLine("> ");
+            } catch (InteractionException e) {
+                if (e.type() == InteractionException.Type.INTERRUPTED) {
+                    interaction.println("  [HITL] 用户取消输入，保守处理为拒绝");
+                    return ApprovalResult.reject("用户取消输入");
+                }
+                interaction.println("  [HITL] 读取用户输入失败，保守处理为拒绝");
                 return ApprovalResult.reject("读取输入失败: " + e.getMessage());
             }
             if (input == null) {
-                out.println("  [HITL] 输入流已关闭，保守处理为拒绝");
+                interaction.println("  [HITL] 输入流已关闭，保守处理为拒绝");
                 return ApprovalResult.reject("输入流已关闭");
             }
 
             String normalized = input.trim().toLowerCase();
             if (normalized.isEmpty() || "y".equals(normalized)) {
-                out.println("  已批准");
+                interaction.println("  已批准");
                 return ApprovalResult.approve();
             }
             switch (normalized) {
                 case "w", "workspace", "expand" -> {
                     if (request.workspaceApprovalRequired()) {
-                        out.println("  已批准，并将扩展工作区（仅当前会话）: " + request.workspaceSuggestedRoot());
+                        interaction.println("  已批准，并将扩展工作区（仅当前会话）: " + request.workspaceSuggestedRoot());
                         return ApprovalResult.approveExpandWorkspace();
                     }
-                    out.println("  当前请求不需要扩展工作区");
+                    interaction.println("  当前请求不需要扩展工作区");
                 }
                 case "wa", "aw", "workspace-all", "expand-all" -> {
                     if (request.workspaceApprovalRequired() && ApprovalPolicy.requiresApproval(request.toolName())) {
                         approvedAllByTool.add(request.toolName());
-                        out.println("  已批准，将扩展工作区（仅当前会话）: " + request.workspaceSuggestedRoot());
-                        out.println("  后续 " + request.toolName() + " 操作将在本次会话中自动通过");
+                        interaction.println("  已批准，将扩展工作区（仅当前会话）: " + request.workspaceSuggestedRoot());
+                        interaction.println("  后续 " + request.toolName() + " 操作将在本次会话中自动通过");
                         return ApprovalResult.approveExpandWorkspaceAndAll();
                     }
-                    out.println("  当前请求不同时包含工作区扩展和危险工具审批");
+                    interaction.println("  当前请求不同时包含工作区扩展和危险工具审批");
                 }
                 case "a" -> {
                     return promptApproveAllScope(request);
                 }
                 case "n" -> {
-                    out.print("  拒绝原因（可直接回车跳过）：");
-                    out.flush();
                     String reason;
                     try {
-                        reason = in.readLine();
-                    } catch (IOException e) {
+                        reason = interaction.readLine("  拒绝原因（可直接回车跳过）：");
+                    } catch (InteractionException e) {
                         reason = "";
                     }
                     return ApprovalResult.reject(reason == null ? "" : reason.trim());
                 }
                 case "s" -> {
-                    out.println("  已跳过本次操作");
+                    interaction.println("  已跳过本次操作");
                     return ApprovalResult.skip();
                 }
                 case "m" -> {
@@ -133,10 +135,10 @@ public class TerminalHitlHandler implements HitlHandler {
                         return modified;
                     }
                 }
-                default -> out.println("  ❓ 无法识别的选项：'" + input + "'，请输入 y/w/wa/a/n/s/m 之一（Enter 等价于 y）");
+                default -> interaction.println("  ❓ 无法识别的选项：'" + input + "'，请输入 y/w/wa/a/n/s/m 之一（Enter 等价于 y）");
             }
         }
-        out.println("  [HITL] 连续多次无效输入，保守处理为拒绝");
+        interaction.println("  [HITL] 连续多次无效输入，保守处理为拒绝");
         return ApprovalResult.reject("连续多次无效输入");
     }
 
@@ -144,46 +146,42 @@ public class TerminalHitlHandler implements HitlHandler {
         String mcpServer = ApprovalPolicy.mcpServerName(request.toolName());
         if (mcpServer == null || mcpServer.isBlank()) {
             approvedAllByTool.add(request.toolName());
-            out.println("  已批准，后续 " + request.toolName() + " 操作将自动通过");
+            interaction.println("  已批准，后续 " + request.toolName() + " 操作将自动通过");
             return ApprovalResult.approveAll();
         }
 
-        out.println("  全部放行范围：");
-        out.println("  [tool / Enter] 仅本工具 " + request.toolName());
-        out.println("  [server]       整个 MCP server " + mcpServer);
-        out.print("> ");
-        out.flush();
+        interaction.println("  全部放行范围：");
+        interaction.println("  [tool / Enter] 仅本工具 " + request.toolName());
+        interaction.println("  [server]       整个 MCP server " + mcpServer);
         String scope;
         try {
-            scope = in.readLine();
-        } catch (IOException e) {
+            scope = interaction.readLine("> ");
+        } catch (InteractionException e) {
             scope = "";
         }
         String normalized = scope == null ? "" : scope.trim().toLowerCase();
         if ("server".equals(normalized) || "s".equals(normalized)) {
             approvedAllByServer.add(mcpServer);
-            out.println("  已批准，后续 MCP server " + mcpServer + " 的工具调用将自动通过");
+            interaction.println("  已批准，后续 MCP server " + mcpServer + " 的工具调用将自动通过");
             return ApprovalResult.approveAllByServer();
         }
         approvedAllByTool.add(request.toolName());
-        out.println("  已批准，后续 " + request.toolName() + " 操作将自动通过");
+        interaction.println("  已批准，后续 " + request.toolName() + " 操作将自动通过");
         return ApprovalResult.approveAll();
     }
 
     private ApprovalResult promptModifiedArguments(ApprovalRequest request) {
-        out.println("  当前参数：" + request.arguments());
-        out.print("  请输入修改后的参数（JSON 格式，空行则使用原始参数）：");
-        out.flush();
+        interaction.println("  当前参数：" + request.arguments());
 
         String modified;
         try {
-            modified = in.readLine();
-        } catch (IOException e) {
-            out.println("  读取失败，回到主菜单");
+            modified = interaction.readLine("  请输入修改后的参数（JSON 格式，空行则使用原始参数）：");
+        } catch (InteractionException e) {
+            interaction.println("  读取失败，回到主菜单");
             return null;
         }
         if (modified == null || modified.isBlank()) {
-            out.println("  输入为空，改为批准原始参数");
+            interaction.println("  输入为空，改为批准原始参数");
             return ApprovalResult.approve();
         }
 
@@ -191,7 +189,7 @@ public class TerminalHitlHandler implements HitlHandler {
         try {
             MAPPER.readTree(trimmed);
         } catch (Exception e) {
-            out.println("  ❌ 修改后的参数不是合法 JSON：" + e.getMessage());
+            interaction.println("  ❌ 修改后的参数不是合法 JSON：" + e.getMessage());
             return null;
         }
         return ApprovalResult.modify(trimmed);

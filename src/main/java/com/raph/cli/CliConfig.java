@@ -14,19 +14,23 @@ public final class CliConfig {
     private static final int DEFAULT_OUTPUT_TRUNCATE_LIMIT = 2000;
     private static final String DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
     private static final String DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
+    private static final String DEFAULT_TUI_MODE = "light";
 
     private final LlmConfig llmConfig;
     private final int outputTruncateLimit;
+    private final String tuiMode;
 
-    private CliConfig(LlmConfig llmConfig, int outputTruncateLimit) {
+    private CliConfig(LlmConfig llmConfig, int outputTruncateLimit, String tuiMode) {
         this.llmConfig = llmConfig;
         this.outputTruncateLimit = outputTruncateLimit;
+        this.tuiMode = tuiMode;
     }
 
     public static CliConfig load() {
         return new CliConfig(
                 loadLlmConfig(),
-                loadOutputTruncateLimit()
+                loadOutputTruncateLimit(),
+                loadTuiMode()
         );
     }
 
@@ -40,6 +44,23 @@ public final class CliConfig {
 
     public int outputTruncateLimit() {
         return outputTruncateLimit;
+    }
+
+    public String tuiMode() {
+        return tuiMode;
+    }
+
+    public boolean lightTuiEnabled() {
+        return !"plain".equalsIgnoreCase(tuiMode);
+    }
+
+    private static String loadTuiMode() {
+        String value = readEnvValue("PAICLI_TUI_MODE", "TUI_MODE");
+        if (value == null || value.isBlank()) {
+            return DEFAULT_TUI_MODE;
+        }
+        String normalized = value.trim().toLowerCase(java.util.Locale.ROOT);
+        return "plain".equals(normalized) ? "plain" : DEFAULT_TUI_MODE;
     }
 
     private static int loadOutputTruncateLimit() {

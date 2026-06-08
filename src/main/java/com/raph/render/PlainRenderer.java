@@ -1,9 +1,12 @@
 package com.raph.render;
 
 import java.io.PrintStream;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** 普通终端渲染器：直接写入 PrintStream。 */
 public class PlainRenderer implements Renderer {
+    private static final AtomicLong STREAM_SEQUENCE = new AtomicLong();
+
     private final PrintStream out;
 
     public PlainRenderer() {
@@ -20,25 +23,46 @@ public class PlainRenderer implements Renderer {
     }
 
     @Override
+    public void emit(RenderEvent event) {
+        if (event == null) {
+            return;
+        }
+        String text = event.text() == null ? "" : event.text();
+        switch (event.type()) {
+            case TEXT, STATUS, ACTIVITY, STREAM_START, STREAM_DELTA, TOKEN_USAGE -> out.print(text);
+            case LINE, STREAM_END, TEAM_LOG, ERROR -> out.println(text);
+            case PLAN_CREATED, PLAN_STARTED, PLAN_TASK_STARTED, PLAN_TASK_COMPLETED,
+                    PLAN_TASK_FAILED, TOOL_STARTED, TOOL_FINISHED -> {
+                // Structural events are consumed by richer renderers; existing plain text remains separate.
+            }
+        }
+        out.flush();
+    }
+
+    @Override
     public StreamHandle contentStream(String prefix) {
-        return new PlainStreamHandle(out, prefix, 0);
+        return new PlainStreamHandle(this, "content", prefix, 0);
     }
 
     @Override
     public StreamHandle previewStream(String prefix, int maxChars) {
-        return new PlainStreamHandle(out, prefix, maxChars);
+        return new PlainStreamHandle(this, "preview", prefix, maxChars);
     }
 
     private static final class PlainStreamHandle implements StreamHandle {
-        private final PrintStream out;
+        private final Renderer renderer;
+        private final String scope;
+        private final String streamId;
         private final String prefix;
         private final int maxChars;
         private int printedChars;
         private boolean contentStarted;
         private boolean truncated;
 
-        private PlainStreamHandle(PrintStream out, String prefix, int maxChars) {
-            this.out = out == null ? System.out : out;
+        private PlainStreamHandle(Renderer renderer, String scope, String prefix, int maxChars) {
+            this.renderer = renderer;
+            this.scope = scope == null || scope.isBlank() ? "content" : scope;
+            this.streamId = this.scope + "-" + STREAM_SEQUENCE.incrementAndGet();
             this.prefix = prefix == null ? "" : prefix;
             this.maxChars = Math.max(0, maxChars);
         }
@@ -49,15 +73,14 @@ public class PlainRenderer implements Renderer {
                 return;
             }
             if (!contentStarted) {
-                out.print(prefix);
+                renderer.emit(RenderEvent.streamStart(scope, streamId, prefix));
                 contentStarted = true;
             }
             String chunk = delta;
             if (maxChars > 0) {
                 int remaining = maxChars - printedChars;
                 if (remaining <= 0) {
-                    out.print("...");
-                    out.flush();
+                    renderer.emit(RenderEvent.streamDelta(scope, streamId, "..."));
                     truncated = true;
                     return;
                 }
@@ -66,12 +89,11 @@ public class PlainRenderer implements Renderer {
                     truncated = true;
                 }
             }
-            out.print(chunk);
+            renderer.emit(RenderEvent.streamDelta(scope, streamId, chunk));
             printedChars += chunk.length();
             if (truncated) {
-                out.print("...");
+                renderer.emit(RenderEvent.streamDelta(scope, streamId, "..."));
             }
-            out.flush();
         }
 
         @Override
@@ -82,8 +104,7 @@ public class PlainRenderer implements Renderer {
         @Override
         public synchronized void finish() {
             if (contentStarted) {
-                out.println();
-                out.flush();
+                renderer.emit(RenderEvent.streamEnd(scope, streamId));
                 contentStarted = false;
             }
         }

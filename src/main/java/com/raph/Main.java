@@ -6,10 +6,13 @@ import com.raph.agent.Agent;
 import com.raph.agent.PlanExecuteAgent;
 import com.raph.hitl.HitlToolRegistry;
 import com.raph.hitl.TerminalHitlHandler;
+import com.raph.interaction.InteractionPort;
+import com.raph.interaction.JLineInteractionPort;
 import com.raph.llm.LlmClient;
 import com.raph.llm.LlmClientManager;
 import com.raph.memory.MemoryManager;
 import com.raph.mcp.MCPServerManager;
+import com.raph.render.LightTuiRenderer;
 import com.raph.render.PlainRenderer;
 import com.raph.render.Renderer;
 import com.raph.tool.ToolRegistry;
@@ -30,23 +33,14 @@ public class Main {
         CliConfig config = CliConfig.load();
         LlmClientManager llmClientManager = new LlmClientManager(config.llmConfig());
         LlmClient llmClient = llmClientManager;
-        TerminalHitlHandler hitlHandler = new TerminalHitlHandler(false);
-        ToolRegistry toolRegistry = new HitlToolRegistry(hitlHandler);
 
         MemoryManager memoryManager = new MemoryManager(llmClient);
         memoryManager.init();
 
-        Renderer renderer = new PlainRenderer(System.out);
-        renderer.start();
-        MCPServerManager mcpServerManager = MCPServerManager.fromDefaultConfig(toolRegistry, renderer::println);
-        mcpServerManager.startAllAndRegisterTools();
-
-        Agent agent = new Agent(llmClient, memoryManager, toolRegistry);
-        PlanExecuteAgent planAgent = new PlanExecuteAgent(llmClient, toolRegistry, config.outputTruncateLimit());
-
+        Terminal terminal;
         LineReader reader;
         try {
-            Terminal terminal = TerminalBuilder.builder()
+            terminal = TerminalBuilder.builder()
                     .system(true)
                     .encoding(StandardCharsets.UTF_8)
                     .build();
@@ -59,13 +53,28 @@ public class Main {
             return;
         }
 
+        Renderer renderer = config.lightTuiEnabled()
+                ? new LightTuiRenderer(System.out, terminal::getWidth)
+                : new PlainRenderer(System.out);
+        renderer.start();
+
+        InteractionPort interaction = new JLineInteractionPort(reader, renderer);
+
+        TerminalHitlHandler hitlHandler = new TerminalHitlHandler(false, interaction);
+        ToolRegistry toolRegistry = new HitlToolRegistry(hitlHandler);
+        MCPServerManager mcpServerManager = MCPServerManager.fromDefaultConfig(toolRegistry, renderer::println);
+        mcpServerManager.startAllAndRegisterTools();
+
+        Agent agent = new Agent(llmClient, memoryManager, toolRegistry);
+        PlanExecuteAgent planAgent = new PlanExecuteAgent(llmClient, toolRegistry, config.outputTruncateLimit());
+
         try {
             if (llmClientManager.isConnected()) {
                 renderer.println("✅ LLM 已连接: " + llmClientManager.status() + "\n");
             } else {
                 renderer.println("⚠ 未配置 LLM。请使用 /connect <api_base> 连接 OpenAI-compatible provider。\n");
             }
-            new TuiSession(reader, renderer, llmClientManager, toolRegistry, hitlHandler,
+            new TuiSession(interaction, renderer, llmClientManager, toolRegistry, hitlHandler,
                     memoryManager, mcpServerManager, agent, planAgent).run();
         } finally {
             mcpServerManager.close();

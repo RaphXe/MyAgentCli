@@ -2,11 +2,14 @@ package com.raph.agent;
 
 import com.raph.llm.LlmClient;
 import com.raph.plan.ExecutionPlan;
+import com.raph.plan.PlanTaskView;
+import com.raph.plan.PlanView;
 import com.raph.plan.Planner;
 import com.raph.plan.Task;
 import com.raph.skill.SkillPrompts;
 import com.raph.skill.ToolSkillResolver;
 import com.raph.tool.ToolRegistry;
+import com.raph.render.RenderEvent;
 import com.raph.render.Renderer;
 import com.raph.memory.ContextUsage;
 import com.raph.memory.ContextWindowConfig;
@@ -56,24 +59,32 @@ public class PlanExecuteAgent {
     }
 
     public String formatPlan(ExecutionPlan plan) {
+        return formatPlan(PlanView.from(plan));
+    }
+
+    public PlanView planView(ExecutionPlan plan) {
+        return PlanView.from(plan);
+    }
+
+    public String formatPlan(PlanView plan) {
         StringBuilder sb = new StringBuilder();
         sb.append("\n📋 执行计划\n");
         sb.append("═══════════════════════════════════\n");
-        sb.append("目标: ").append(plan.getGoal()).append("\n");
-        sb.append("摘要: ").append(plan.getSummary()).append("\n");
+        sb.append("目标: ").append(plan.goal()).append("\n");
+        sb.append("摘要: ").append(plan.summary()).append("\n");
         sb.append("\n任务列表:\n");
 
-        for (Task task : plan.getAllTasks()) {
+        for (PlanTaskView task : plan.tasks()) {
             sb.append(String.format("  [%s] %s - %s",
-                    task.getId(), task.getType(), task.getDescription()));
-            if (!task.getDependencies().isEmpty()) {
-                sb.append("  ← 依赖: ").append(String.join(", ", task.getDependencies()));
+                    task.id(), task.type(), task.description()));
+            if (!task.dependencies().isEmpty()) {
+                sb.append("  ← 依赖: ").append(String.join(", ", task.dependencies()));
             }
             sb.append("\n");
         }
 
         sb.append("\n执行顺序: ");
-        sb.append(String.join(" → ", plan.getExecutionOrder()));
+        sb.append(String.join(" → ", plan.executionOrder()));
         sb.append("\n═══════════════════════════════════\n");
         return sb.toString();
     }
@@ -85,18 +96,27 @@ public class PlanExecuteAgent {
     public ExecutionResult executePlan(ExecutionPlan plan, Renderer renderer) {
         if (plan.getStatus() != ExecutionPlan.PlanStatus.CREATED) {
             String message = "⚠ 计划状态不是CREATED，无法执行";
+            if (renderer != null) {
+                renderer.emit(RenderEvent.error("plan", message));
+            }
             emit(renderer, message + "\n");
             return new ExecutionResult(message, null);
         }
 
         plan.markStarted();
         StringBuilder output = new StringBuilder();
+        if (renderer != null) {
+            renderer.emit(RenderEvent.planStarted(plan.getGoal(), "开始执行计划"));
+        }
         append(output, renderer, "\n🚀 开始执行计划...\n");
         Map<String, String> taskResults = new LinkedHashMap<>();
         boolean allSuccess = true;
 
         for (String taskId : plan.getExecutionOrder()) {
             Task task = plan.getTask(taskId);
+            if (renderer != null) {
+                renderer.emit(RenderEvent.planTaskStarted(taskId, task.getDescription()));
+            }
             append(output, renderer, String.format("\n⏳ [%s] %s\n", taskId, task.getDescription()));
 
             try {
@@ -104,9 +124,15 @@ public class PlanExecuteAgent {
                 String result = executeTask(task, taskResults, plan, renderer);
                 task.markCompleted(result);
                 taskResults.put(taskId, result);
+                if (renderer != null) {
+                    renderer.emit(RenderEvent.planTaskCompleted(taskId, task.getDescription()));
+                }
                 append(output, renderer, "   ✅ 完成\n");
             } catch (Exception e) {
                 task.markFailed(e.getMessage());
+                if (renderer != null) {
+                    renderer.emit(RenderEvent.planTaskFailed(taskId, e.getMessage()));
+                }
                 append(output, renderer, String.format("   ❌ 失败: %s\n", e.getMessage()));
                 allSuccess = false;
 
@@ -208,10 +234,16 @@ public class PlanExecuteAgent {
                         response.getContent(), response.toolCalls()));
 
                 for (LlmClient.ToolCall toolCall : response.toolCalls()) {
+                    if (renderer != null) {
+                        renderer.emit(RenderEvent.toolStarted("plan:" + task.getId(), toolCall.function().name()));
+                    }
                     emit(renderer, "   🔧 调用工具: " + toolCall.function().name() + "\n");
                 }
                 for (ToolRegistry.ToolExecutionResult result : toolRegistry.executeTools(response.toolCalls())) {
                     messages.add(LlmClient.Message.tool(result.toolCallId(), result.result()));
+                    if (renderer != null) {
+                        renderer.emit(RenderEvent.toolFinished("plan:" + task.getId(), result.toolName()));
+                    }
                     emit(renderer, "   ↳ 工具完成\n");
                 }
             } else {

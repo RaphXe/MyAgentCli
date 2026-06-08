@@ -4,19 +4,21 @@ import com.raph.agent.Agent;
 import com.raph.agent.AgentRuntime;
 import com.raph.agent.PlanExecuteAgent;
 import com.raph.hitl.TerminalHitlHandler;
+import com.raph.interaction.InteractionException;
+import com.raph.interaction.InteractionPort;
 import com.raph.llm.LlmClientManager;
 import com.raph.llm.LlmConfig;
 import com.raph.memory.ContextUsage;
 import com.raph.memory.MemoryManager;
 import com.raph.mcp.MCPServerManager;
 import com.raph.plan.ExecutionPlan;
+import com.raph.plan.PlanView;
+import com.raph.render.RenderEvent;
 import com.raph.render.Renderer;
+import com.raph.render.ViewAwareRenderer;
 import com.raph.skill.Skill;
 import com.raph.skill.SkillRepository;
 import com.raph.tool.ToolRegistry;
-import org.jline.reader.EndOfFileException;
-import org.jline.reader.LineReader;
-import org.jline.reader.UserInterruptException;
 
 import java.io.IOException;
 import java.util.List;
@@ -24,7 +26,7 @@ import java.util.List;
 public class TuiSession {
     private static final String PROMPT_CONFIRM = "❓ 是否执行此计划? [y/n]: ";
 
-    private final LineReader reader;
+    private final InteractionPort interaction;
     private final Renderer renderer;
     private final LlmClientManager llmClient;
     private final ToolRegistry toolRegistry;
@@ -34,10 +36,11 @@ public class TuiSession {
     private final Agent agent;
     private final PlanExecuteAgent planAgent;
     private AgentRuntime teamRuntime;
+    private PlanView lastPlanView;
     private SessionMode mode = SessionMode.NORMAL;
     private boolean exitRequested;
 
-    public TuiSession(LineReader reader,
+    public TuiSession(InteractionPort interaction,
                       Renderer renderer,
                       LlmClientManager llmClient,
                       ToolRegistry toolRegistry,
@@ -46,7 +49,7 @@ public class TuiSession {
                       MCPServerManager mcpServerManager,
                       Agent agent,
                       PlanExecuteAgent planAgent) {
-        this.reader = reader;
+        this.interaction = interaction;
         this.renderer = renderer;
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
@@ -61,15 +64,17 @@ public class TuiSession {
         renderer.println("💡 提示: 输入 '/connect <api_base>' 连接模型, '/model' 切换模型, '/plan' 切换计划模式, '/team' 切换团队模式, '/mcp' 查看 MCP, '/skills' 查看 skill, '/hitl on|off' 切换人工审批, '/save <描述>' 保存记忆, '/clear' 清空历史, '/exit' 退出或返回普通模式\n");
 
         while (true) {
-            renderer.print(TuiStatusLine.contextBar(currentContextUsage()));
+            refreshRendererView();
+            renderer.emit(RenderEvent.status(TuiStatusLine.contextBar(currentContextUsage())));
 
             String line;
             try {
-                line = reader.readLine(mode.prompt());
-            } catch (UserInterruptException e) {
-                renderer.println("\n已取消当前输入。输入 /exit 可退出。\n");
-                continue;
-            } catch (EndOfFileException e) {
+                line = interaction.readLine(mode.prompt());
+            } catch (InteractionException e) {
+                if (e.type() == InteractionException.Type.INTERRUPTED) {
+                    renderer.println("\n已取消当前输入。输入 /exit 可退出。\n");
+                    continue;
+                }
                 renderer.println("\n输入流已关闭，正在退出。\n");
                 break;
             }
@@ -226,13 +231,13 @@ public class TuiSession {
     }
 
     private void handleNormalInput(String input) {
-        renderer.print("🤔 思考中...");
+        renderer.emit(RenderEvent.activity("agent", "🤔 思考中..."));
         String response;
         Renderer.StreamHandle streamRenderer = renderer.contentStream("🤖 Agent: ");
         try {
             response = agent.run(input, streamRenderer);
         } catch (IOException e) {
-            renderer.println("\n❌ Agent 执行失败: " + e.getMessage() + "\n");
+            renderer.emit(RenderEvent.error("agent", "\n❌ Agent 执行失败: " + e.getMessage() + "\n"));
             return;
         }
         if (streamRenderer.hasContent()) {
@@ -241,7 +246,13 @@ public class TuiSession {
             renderer.print("\r              \r");
             renderer.println("🤖 Agent: " + response);
         }
-        renderer.print(TuiStatusLine.tokenSummary(agent));
+        renderer.emit(RenderEvent.tokenUsage(TuiStatusLine.tokenSummary(agent),
+                java.util.Map.of(
+                        "input", String.valueOf(agent.getLastInputTokens()),
+                        "output", String.valueOf(agent.getLastOutputTokens()),
+                        "total", String.valueOf(agent.getLastTotalTokens()),
+                        "context", String.valueOf(agent.getContextTokens())
+                )));
     }
 
     private ContextUsage currentContextUsage() {
@@ -283,12 +294,11 @@ public class TuiSession {
 
         String apiKey;
         try {
-            apiKey = reader.readLine("🔑 API key: ", '*').trim();
-        } catch (UserInterruptException e) {
-            renderer.println("\n已取消连接。\n");
-            return;
-        } catch (EndOfFileException e) {
-            renderer.println("\n输入流已关闭，无法连接。\n");
+            apiKey = interaction.readSecret("🔑 API key: ").trim();
+        } catch (InteractionException e) {
+            renderer.println(e.type() == InteractionException.Type.INTERRUPTED
+                    ? "\n已取消连接。\n"
+                    : "\n输入流已关闭，无法连接。\n");
             return;
         }
         if (apiKey.isEmpty()) {
@@ -366,12 +376,11 @@ public class TuiSession {
 
     private String readModelSelection() {
         try {
-            return reader.readLine("请选择模型编号或输入模型名: ").trim();
-        } catch (UserInterruptException e) {
-            renderer.println("\n已取消模型选择。\n");
-            return null;
-        } catch (EndOfFileException e) {
-            renderer.println("\n输入流已关闭，无法选择模型。\n");
+            return interaction.readLine("请选择模型编号或输入模型名: ").trim();
+        } catch (InteractionException e) {
+            renderer.println(e.type() == InteractionException.Type.INTERRUPTED
+                    ? "\n已取消模型选择。\n"
+                    : "\n输入流已关闭，无法选择模型。\n");
             return null;
         }
     }
@@ -440,6 +449,7 @@ public class TuiSession {
         renderer.println("👥 启动自治 Multi-Agent 协作...\n");
         try {
             String response = teamRuntime().run(teamTask);
+            refreshRendererView();
             renderer.println(response);
         } catch (IOException e) {
             renderer.println("❌ 多 Agent 执行失败: " + e.getMessage() + "\n");
@@ -467,13 +477,20 @@ public class TuiSession {
     }
 
     private void handlePlanInput(String input) {
-        renderer.print("🤔 规划中...");
+        renderer.emit(RenderEvent.activity("plan", "🤔 规划中..."));
         try {
             ExecutionPlan plan = planAgent.createPlan(input);
             renderer.print("\r              \r");
-            renderer.println(planAgent.formatPlan(plan));
+            String formattedPlan = planAgent.formatPlan(plan);
+            lastPlanView = planAgent.planView(plan);
+            refreshRendererView();
+            renderer.emit(RenderEvent.planCreated(plan.getGoal(), formattedPlan)
+                    .withMetadata("goal", lastPlanView.goal())
+                    .withMetadata("summary", lastPlanView.summary())
+                    .withMetadata("tasks", String.valueOf(lastPlanView.totalTasks())));
+            renderer.println(formattedPlan);
 
-            String confirm = reader.readLine(PROMPT_CONFIRM).trim();
+            String confirm = interaction.readLine(PROMPT_CONFIRM).trim();
             if (confirm.equalsIgnoreCase("y") || confirm.equalsIgnoreCase("yes")) {
                 runPlanExecutionLoop(plan);
             } else {
@@ -482,22 +499,52 @@ public class TuiSession {
         } catch (IOException e) {
             renderer.print("\r              \r");
             renderer.println("❌ 计划创建失败: " + e.getMessage() + "\n");
+        } catch (InteractionException e) {
+            renderer.print("\r              \r");
+            renderer.println(e.type() == InteractionException.Type.INTERRUPTED
+                    ? "⏭ 已取消执行\n"
+                    : "输入流已关闭，无法确认计划。\n");
         }
     }
 
     private void runPlanExecutionLoop(ExecutionPlan plan) {
         renderer.println("\n🚀 用户确认，开始执行计划...\n");
         PlanExecuteAgent.ExecutionResult result = planAgent.executePlan(plan, renderer);
+        lastPlanView = planAgent.planView(plan);
+        refreshRendererView();
 
         while (result.hasPendingPlan()) {
-            String confirm = reader.readLine("🔄 重新规划已完成，是否执行新计划? [y/n]: ").trim();
+            String confirm;
+            try {
+                confirm = interaction.readLine("🔄 重新规划已完成，是否执行新计划? [y/n]: ").trim();
+            } catch (InteractionException e) {
+                renderer.println(e.type() == InteractionException.Type.INTERRUPTED
+                        ? "⏭ 已取消执行重新规划的计划\n"
+                        : "输入流已关闭，无法确认重新规划。\n");
+                break;
+            }
             if (confirm.equalsIgnoreCase("y") || confirm.equalsIgnoreCase("yes")) {
                 renderer.println("\n🚀 执行重新规划的计划...\n");
-                result = planAgent.executePlan(result.pendingPlan(), renderer);
+                ExecutionPlan pendingPlan = result.pendingPlan();
+                result = planAgent.executePlan(pendingPlan, renderer);
+                lastPlanView = planAgent.planView(pendingPlan);
+                refreshRendererView();
             } else {
                 renderer.println("⏭ 已取消执行重新规划的计划\n");
                 break;
             }
+        }
+    }
+
+    private void refreshRendererView() {
+        if (!(renderer instanceof ViewAwareRenderer viewAwareRenderer)) {
+            return;
+        }
+        if (lastPlanView != null) {
+            viewAwareRenderer.updatePlanView(lastPlanView);
+        }
+        if (teamRuntime != null) {
+            viewAwareRenderer.updateTeamView(teamRuntime.currentTeamView());
         }
     }
 }

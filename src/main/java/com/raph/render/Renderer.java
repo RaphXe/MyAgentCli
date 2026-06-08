@@ -17,17 +17,26 @@ public interface Renderer extends AutoCloseable {
     PrintStream stream();
 
     default void print(String text) {
-        stream().print(text);
-        stream().flush();
+        emit(RenderEvent.text(text));
     }
 
     default void println(String text) {
-        stream().println(text);
-        stream().flush();
+        emit(RenderEvent.line(text));
     }
 
     default void printf(String format, Object... args) {
-        stream().printf(format, args);
+        print(String.format(format, args));
+    }
+
+    default void emit(RenderEvent event) {
+        if (event == null) {
+            return;
+        }
+        String text = event.text() == null ? "" : event.text();
+        switch (event.type()) {
+            case LINE, STREAM_END -> stream().println(text);
+            default -> stream().print(text);
+        }
         stream().flush();
     }
 

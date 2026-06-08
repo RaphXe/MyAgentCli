@@ -7,6 +7,7 @@ import com.raph.memory.ContextUsage;
 import com.raph.memory.ContextWindowConfig;
 import com.raph.tool.ToolRegistry;
 import com.raph.render.PlainRenderer;
+import com.raph.render.RenderEvent;
 import com.raph.render.Renderer;
 
 import java.io.IOException;
@@ -44,6 +45,10 @@ public class AgentRuntime {
     private final int maxContextTokens;
     private final Renderer renderer;
     private String finalAnswer;
+    private String currentGoal = "";
+    private String runtimeStatus = "idle";
+    private int currentRound;
+    private int agentSteps;
 
     public AgentRuntime(LlmClient client, ToolRegistry toolRegistry) {
         this(client, toolRegistry, DEFAULT_MAX_ROUNDS, new PlainRenderer(System.out));
@@ -78,6 +83,10 @@ public class AgentRuntime {
 
     public String run(String goal) throws IOException {
         finalAnswer = null;
+        currentGoal = goal == null ? "" : goal;
+        runtimeStatus = "running";
+        currentRound = 0;
+        agentSteps = 0;
         String threadId = "team-" + System.currentTimeMillis();
         messageBus.send(AgentMessage.of(threadId, "user", "coordinator", AgentMessage.Type.GOAL, goal));
 
@@ -88,62 +97,68 @@ public class AgentRuntime {
         logLine(log, "上限：round=" + maxRounds + ", agentSteps=" + MAX_AGENT_STEPS + "\n");
 
         int idleRounds = 0;
-        int agentSteps = 0;
-        for (int round = 1; round <= maxRounds && agentSteps < MAX_AGENT_STEPS; round++) {
-            boolean changed = false;
-            logLine(log, "┌─ Round " + round + " ─────────────────────────");
-            logLine(log, "│ 任务板快照：\n" + indent(taskBoard.renderSummary(), "│   "));
+        try {
+            for (int round = 1; round <= maxRounds && agentSteps < MAX_AGENT_STEPS; round++) {
+                currentRound = round;
+                boolean changed = false;
+                logLine(log, "┌─ Round " + round + " ─────────────────────────");
+                logLine(log, "│ 任务板快照：\n" + indent(taskBoard.renderSummary(), "│   "));
 
-            for (TeamAgent agent : agents.values()) {
-                if (agentSteps >= MAX_AGENT_STEPS) {
-                    logLine(log, "│ ⚠ 达到 Agent step 上限，停止继续唤醒。 ");
-                    break;
+                for (TeamAgent agent : agents.values()) {
+                    if (agentSteps >= MAX_AGENT_STEPS) {
+                        logLine(log, "│ ⚠ 达到 Agent step 上限，停止继续唤醒。 ");
+                        break;
+                    }
+
+                    List<AgentMessage> rawInbox = messageBus.drain(agent.id());
+                    List<AgentMessage> inbox = filterInbox(agent, rawInbox);
+                    int dropped = rawInbox.size() - inbox.size();
+                    if (!shouldWake(agent, inbox, round)) {
+                        logLine(log, "│ ⏭ skip " + agent.id() + " (" + agent.role() + ") inbox=" + inbox.size()
+                                + (dropped > 0 ? ", dropped=" + dropped + " " + summarizeMessages(rawInbox, inbox) : ""));
+                        continue;
+                    }
+
+                    agentSteps++;
+                    logLine(log, "│ ▶ step#" + agentSteps + " " + agent.id() + " (" + agent.role() + ") inbox=" + inbox.size());
+                    AgentDecision decision = callAgentWithHeartbeat(agent, view(goal), inbox, log);
+                    changed |= applyDecision(threadId, agent, decision, log);
+
+                    if (finalAnswer != null) {
+                        logLine(log, "│ ✅ 已有最终答案，提前收束。 ");
+                        break;
+                    }
                 }
 
-                List<AgentMessage> rawInbox = messageBus.drain(agent.id());
-                List<AgentMessage> inbox = filterInbox(agent, rawInbox);
-                int dropped = rawInbox.size() - inbox.size();
-                if (!shouldWake(agent, inbox, round)) {
-                    logLine(log, "│ ⏭ skip " + agent.id() + " (" + agent.role() + ") inbox=" + inbox.size()
-                            + (dropped > 0 ? ", dropped=" + dropped + " " + summarizeMessages(rawInbox, inbox) : ""));
-                    continue;
-                }
-
-                agentSteps++;
-                logLine(log, "│ ▶ step#" + agentSteps + " " + agent.id() + " (" + agent.role() + ") inbox=" + inbox.size());
-                AgentDecision decision = callAgentWithHeartbeat(agent, view(goal), inbox, log);
-                changed |= applyDecision(threadId, agent, decision, log);
+                logLine(log, "└─ Round " + round + " 结束，changed=" + changed + "\n");
 
                 if (finalAnswer != null) {
-                    logLine(log, "│ ✅ 已有最终答案，提前收束。 ");
                     break;
                 }
-            }
 
-            logLine(log, "└─ Round " + round + " 结束，changed=" + changed + "\n");
-
-            if (finalAnswer != null) {
-                break;
-            }
-
-            if (!changed) {
-                idleRounds++;
-                if (idleRounds >= 2) {
-                    logLine(log, "⚠ 连续两轮没有状态变化，唤醒 coordinator 做收束/重规划。 ");
-                    messageBus.send(AgentMessage.of(threadId, "runtime", "coordinator",
-                            AgentMessage.Type.BLOCKED, "连续两轮没有有效状态变化，请判断是否需要创建任务、重新委派或给出最终结论。"));
+                if (!changed) {
+                    idleRounds++;
+                    if (idleRounds >= 2) {
+                        logLine(log, "⚠ 连续两轮没有状态变化，唤醒 coordinator 做收束/重规划。 ");
+                        messageBus.send(AgentMessage.of(threadId, "runtime", "coordinator",
+                                AgentMessage.Type.BLOCKED, "连续两轮没有有效状态变化，请判断是否需要创建任务、重新委派或给出最终结论。"));
+                        idleRounds = 0;
+                    }
+                } else {
                     idleRounds = 0;
                 }
-            } else {
-                idleRounds = 0;
             }
-        }
 
-        if (finalAnswer == null) {
-            finalAnswer = buildFallbackSummary();
+            if (finalAnswer == null) {
+                finalAnswer = buildFallbackSummary();
+            }
+            runtimeStatus = "completed";
+            logLine(log, "✅ 团队输出：\n" + finalAnswer);
+            return "✅ Multi-Agent 自治调度结束。\n\n" + finalAnswer;
+        } catch (IOException | RuntimeException e) {
+            runtimeStatus = "failed";
+            throw e;
         }
-        logLine(log, "✅ 团队输出：\n" + finalAnswer);
-        return "✅ Multi-Agent 自治调度结束。";
     }
 
     public ContextUsage currentContextUsage() {
@@ -162,6 +177,21 @@ public class AgentRuntime {
         String peakLabel = peak == null ? "none" : peak.id() + "/" + peak.role();
         String details = "peak=" + peakLabel + ", agents=" + agents.size() + ", total=" + totalTokens;
         return new ContextUsage("团队模式", peakTokens, maxContextTokens, details);
+    }
+
+    public TeamView currentTeamView() {
+        return TeamView.from(
+                currentGoal,
+                runtimeStatus,
+                taskBoard.allTasks(),
+                new ArrayList<>(agents.values()),
+                messageBus.recentTranscript(RECENT_TRANSCRIPT_LIMIT),
+                finalAnswer,
+                maxRounds,
+                currentRound,
+                agentSteps,
+                MAX_AGENT_STEPS
+        );
     }
 
     private AgentDecision callAgentWithHeartbeat(TeamAgent agent, RuntimeView view,
@@ -421,7 +451,9 @@ public class AgentRuntime {
                     if (!canExecuteToolAction(agent, type)) {
                         logLine(log, "│   ⊘ tool " + type + " denied for " + agent.id() + " (" + agent.role() + ")");
                     } else {
+                        renderer.emit(RenderEvent.toolStarted("team:" + agent.id(), type));
                         String result = executeToolAction(type, action);
+                        renderer.emit(RenderEvent.toolFinished("team:" + agent.id(), type));
                         messageBus.send(AgentMessage.of(threadId, "tool:" + type, agent.id(),
                                 AgentMessage.Type.ANSWER, result));
                         logLine(log, "│   🔧 tool " + type + " -> " + agent.id() + ": " + shorten(result));
@@ -818,7 +850,7 @@ public class AgentRuntime {
 
     private synchronized void logLine(StringBuilder log, String line) {
         log.append(line).append("\n");
-        renderer.println(line);
+        renderer.emit(RenderEvent.teamLog(line));
     }
 
     private static String indent(String value, String prefix) {
