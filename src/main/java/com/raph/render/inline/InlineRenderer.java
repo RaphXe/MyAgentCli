@@ -12,16 +12,19 @@ import java.util.List;
 /**
  * Inline, scrollback-preserving renderer.
  *
- * <p>M1 scope: JLine-managed status dock, inline prompt hints, and lifecycle hooks.
- * Foldable transcript blocks and inline HITL are intentionally left for later milestones.
+ * <p>Inline mode keeps generated output in scrollback while richer transient UI,
+ * such as the status dock and thinking panel, is managed around the prompt.
  */
 public class InlineRenderer extends PlainRenderer {
     private final Terminal terminal;
     private final PrintStream out;
+    private final Object outputLock = new Object();
     private final BottomStatusBar statusBar;
     private final BlockRegistry blockRegistry = new BlockRegistry();
     private final ToolCallRenderer toolCallRenderer;
+    private final CodeBlockRenderer codeBlockRenderer;
     private final InlineActivityDisplay activityDisplay;
+    private final MarkdownStreamProcessor markdownStream = new MarkdownStreamProcessor();
     private final Object transcriptLock = new Object();
     private final List<TranscriptEntry> transcript = new ArrayList<>();
     private volatile LineReader lineReader;
@@ -41,8 +44,9 @@ public class InlineRenderer extends PlainRenderer {
         this.statusBar = TerminalCapabilities.supportsStatusDock(terminal)
                 ? new BottomStatusBar(terminal)
                 : null;
-        this.activityDisplay = new InlineActivityDisplay(terminal, this.out);
+        this.activityDisplay = new InlineActivityDisplay(terminal, this.out, outputLock);
         this.toolCallRenderer = new ToolCallRenderer(this.out, blockRegistry);
+        this.codeBlockRenderer = new CodeBlockRenderer(this.out);
     }
 
     public void bindLineReader(LineReader lineReader) {
@@ -51,10 +55,12 @@ public class InlineRenderer extends PlainRenderer {
 
     @Override
     public void beginTurn() {
+        activityDisplay.end();
         synchronized (transcriptLock) {
             transcript.clear();
             renderedRows = 0;
             redrawing = false;
+            markdownStream.reset();
         }
         blockRegistry.clear();
     }
@@ -96,6 +102,7 @@ public class InlineRenderer extends PlainRenderer {
 
     @Override
     public boolean appendToolCalls(List<com.raph.llm.LlmClient.ToolCall> toolCalls) {
+        activityDisplay.end();
         FoldableBlock block = toolCallRenderer.createBlock(toolCalls);
         if (block == null) {
             return false;
@@ -103,6 +110,12 @@ public class InlineRenderer extends PlainRenderer {
         blockRegistry.register(block);
         appendTranscriptEntry(new BlockEntry(block));
         return true;
+    }
+
+    @Override
+    public void printPanel(String title, String body) {
+        activityDisplay.end();
+        appendTranscriptEntry(new PanelEntry(title, body));
     }
 
     @Override
@@ -143,12 +156,20 @@ public class InlineRenderer extends PlainRenderer {
                     + normalizeLine(event.text()) + "\n");
             return;
         }
-        if (event.type() == RenderEvent.Type.STREAM_START || event.type() == RenderEvent.Type.STREAM_DELTA) {
+        if (event.type() == RenderEvent.Type.STREAM_START) {
+            activityDisplay.end();
             appendTranscriptText(event.text());
+            markdownStream.reset();
+            return;
+        }
+        if (event.type() == RenderEvent.Type.STREAM_DELTA) {
+            activityDisplay.end();
+            appendStreamText(event.text());
             return;
         }
         if (event.type() == RenderEvent.Type.STREAM_END) {
-            appendTranscriptText("\n");
+            activityDisplay.end();
+            finishStreamText();
             return;
         }
         super.emit(event);
@@ -186,11 +207,15 @@ public class InlineRenderer extends PlainRenderer {
     private void printAbove(String text) {
         LineReader reader = activeReader();
         if (reader != null) {
-            reader.printAbove(text == null ? "" : text);
+            synchronized (outputLock) {
+                reader.printAbove(text == null ? "" : text);
+            }
             return;
         }
-        out.print(text == null ? "" : text);
-        out.flush();
+        synchronized (outputLock) {
+            out.print(text == null ? "" : text);
+            out.flush();
+        }
     }
 
     private void appendTranscriptText(String text) {
@@ -198,6 +223,18 @@ public class InlineRenderer extends PlainRenderer {
             return;
         }
         appendTranscriptEntry(new TextEntry(text));
+    }
+
+    private void appendStreamText(String text) {
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        markdownStream.append(text);
+    }
+
+    private void finishStreamText() {
+        markdownStream.finish();
+        appendTranscriptText("\n");
     }
 
     private void appendTranscriptEntry(TranscriptEntry entry) {
@@ -227,21 +264,25 @@ public class InlineRenderer extends PlainRenderer {
             LineReader reader = activeReader();
             if (reader != null) {
                 renderedRows = rowsAfter;
-                reader.printAbove(snapshot.toString());
-                if (statusBar != null) {
-                    statusBar.beforeInput();
+                synchronized (outputLock) {
+                    reader.printAbove(snapshot.toString());
+                    if (statusBar != null) {
+                        statusBar.beforeInput();
+                    }
                 }
                 return;
             }
             redrawing = true;
             try {
-                if (renderedRows > 0) {
-                    out.print(AnsiSeq.moveUp(renderedRows));
+                synchronized (outputLock) {
+                    if (renderedRows > 0) {
+                        out.print(AnsiSeq.moveUp(renderedRows));
+                    }
+                    out.print('\r');
+                    out.print(AnsiSeq.CLEAR_TO_EOS);
+                    out.print(snapshot);
+                    out.flush();
                 }
-                out.print('\r');
-                out.print(AnsiSeq.CLEAR_TO_EOS);
-                out.print(snapshot);
-                out.flush();
                 renderedRows = rowsAfter;
             } finally {
                 redrawing = false;
@@ -255,11 +296,15 @@ public class InlineRenderer extends PlainRenderer {
         }
         LineReader reader = activeReader();
         if (reader != null && !redrawing) {
-            reader.printAbove(rendered);
+            synchronized (outputLock) {
+                reader.printAbove(rendered);
+            }
             return;
         }
-        out.print(rendered);
-        out.flush();
+        synchronized (outputLock) {
+            out.print(rendered);
+            out.flush();
+        }
     }
 
     private int estimateRows(String text) {
@@ -372,6 +417,236 @@ public class InlineRenderer extends PlainRenderer {
         @Override
         public String render() {
             return String.join(System.lineSeparator(), block.currentLines()) + System.lineSeparator();
+        }
+    }
+
+    private record PanelEntry(String title, String body) implements TranscriptEntry {
+        @Override
+        public String render() {
+            String normalizedBody = body == null ? "" : body.stripTrailing();
+            StringBuilder rendered = new StringBuilder();
+            if (title != null && !title.isBlank()) {
+                rendered.append("╭─ ").append(title.trim()).append(System.lineSeparator());
+            }
+            if (!normalizedBody.isBlank()) {
+                String[] lines = normalizedBody.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1);
+                for (String line : lines) {
+                    rendered.append(line).append(System.lineSeparator());
+                }
+            }
+            if (title != null && !title.isBlank()) {
+                rendered.append("╰").append(System.lineSeparator());
+            }
+            if (rendered.isEmpty()) {
+                rendered.append(System.lineSeparator());
+            }
+            return rendered.toString();
+        }
+    }
+
+    private final class MarkdownStreamProcessor {
+        private final InlineStyler inlineStyler = new InlineStyler();
+        private final StringBuilder pendingFenceCandidate = new StringBuilder();
+        private final StringBuilder fenceHeader = new StringBuilder();
+        private final StringBuilder codeLine = new StringBuilder();
+        private final List<String> codeLines = new ArrayList<>();
+        private boolean lineStart = true;
+        private boolean collectingFenceHeader;
+        private boolean inFence;
+        private String language = "";
+
+        void append(String text) {
+            for (int i = 0; i < text.length(); i++) {
+                appendChar(text.charAt(i));
+            }
+        }
+
+        void finish() {
+            if (inFence) {
+                if (!codeLine.isEmpty()) {
+                    codeLines.add(codeLine.toString());
+                    codeLine.setLength(0);
+                }
+                finishCodeBlock();
+                return;
+            }
+            if (collectingFenceHeader) {
+                inlineStyler.append(fenceHeader.toString());
+                fenceHeader.setLength(0);
+                collectingFenceHeader = false;
+            }
+            flushPendingFenceCandidate();
+            inlineStyler.finish();
+        }
+
+        void reset() {
+            inlineStyler.reset();
+            pendingFenceCandidate.setLength(0);
+            fenceHeader.setLength(0);
+            codeLine.setLength(0);
+            codeLines.clear();
+            lineStart = true;
+            collectingFenceHeader = false;
+            inFence = false;
+            language = "";
+        }
+
+        private void appendChar(char ch) {
+            if (inFence) {
+                codeLine.append(ch);
+                if (ch == '\n') {
+                    processCodeLine();
+                }
+                return;
+            }
+            if (collectingFenceHeader) {
+                fenceHeader.append(ch);
+                if (ch == '\n') {
+                    beginCodeBlock();
+                }
+                return;
+            }
+            if (lineStart) {
+                pendingFenceCandidate.append(ch);
+                String pending = pendingFenceCandidate.toString();
+                if ("```".startsWith(pending) && pending.length() < 3) {
+                    return;
+                }
+                if (pending.startsWith("```")) {
+                    collectingFenceHeader = true;
+                    fenceHeader.append(pending);
+                    pendingFenceCandidate.setLength(0);
+                    if (ch == '\n') {
+                        beginCodeBlock();
+                    }
+                    return;
+                }
+                flushPendingFenceCandidate();
+                return;
+            }
+
+            inlineStyler.append(ch);
+            if (ch == '\n') {
+                lineStart = true;
+            }
+        }
+
+        private void beginCodeBlock() {
+            language = fenceHeader.toString()
+                    .replace("\r", "")
+                    .replace("\n", "")
+                    .substring(3)
+                    .trim();
+            fenceHeader.setLength(0);
+            collectingFenceHeader = false;
+            inFence = true;
+            lineStart = true;
+        }
+
+        private void processCodeLine() {
+            String line = codeLine.toString();
+            codeLine.setLength(0);
+            if (isFenceLine(line)) {
+                finishCodeBlock();
+                lineStart = true;
+                return;
+            }
+            codeLines.add(line);
+            lineStart = true;
+        }
+
+        private void finishCodeBlock() {
+            FoldableBlock block = codeBlockRenderer.createBlock(language, codeLines);
+            blockRegistry.register(block);
+            appendTranscriptEntry(new BlockEntry(block));
+            codeLines.clear();
+            language = "";
+            inFence = false;
+            lineStart = true;
+        }
+
+        private void flushPendingFenceCandidate() {
+            if (pendingFenceCandidate.isEmpty()) {
+                return;
+            }
+            String pending = pendingFenceCandidate.toString();
+            pendingFenceCandidate.setLength(0);
+            inlineStyler.append(pending);
+            lineStart = pending.endsWith("\n") || pending.endsWith("\r");
+        }
+
+        private boolean isFenceLine(String line) {
+            return line != null && line.trim().startsWith("```");
+        }
+    }
+
+    private final class InlineStyler {
+        private final StringBuilder pendingStars = new StringBuilder();
+        private final StringBuilder boldBuffer = new StringBuilder();
+        private boolean inBold;
+
+        void append(String text) {
+            if (text == null || text.isEmpty()) {
+                return;
+            }
+            for (int i = 0; i < text.length(); i++) {
+                append(text.charAt(i));
+            }
+        }
+
+        void append(char ch) {
+            if (ch == '*') {
+                pendingStars.append(ch);
+                if (pendingStars.length() == 2) {
+                    toggleBold();
+                }
+                return;
+            }
+            flushPendingStars();
+            if (inBold) {
+                boldBuffer.append(ch);
+                return;
+            }
+            appendTranscriptText(String.valueOf(ch));
+        }
+
+        void finish() {
+            if (inBold) {
+                appendTranscriptText("**" + boldBuffer);
+                boldBuffer.setLength(0);
+                inBold = false;
+            }
+            flushPendingStars();
+        }
+
+        void reset() {
+            pendingStars.setLength(0);
+            boldBuffer.setLength(0);
+            inBold = false;
+        }
+
+        private void toggleBold() {
+            pendingStars.setLength(0);
+            if (inBold) {
+                appendTranscriptText(AnsiSeq.BOLD_DARK_BLUE + boldBuffer + AnsiSeq.RESET);
+                boldBuffer.setLength(0);
+                inBold = false;
+                return;
+            }
+            inBold = true;
+        }
+
+        private void flushPendingStars() {
+            if (pendingStars.isEmpty()) {
+                return;
+            }
+            String stars = pendingStars.toString();
+            pendingStars.setLength(0);
+            if (inBold) {
+                boldBuffer.append(stars);
+            } else {
+                appendTranscriptText(stars);
+            }
         }
     }
 }

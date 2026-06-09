@@ -15,6 +15,7 @@ import com.raph.mcp.MCPServerManager;
 import com.raph.render.LightTuiRenderer;
 import com.raph.render.PlainRenderer;
 import com.raph.render.Renderer;
+import com.raph.render.inline.InlineInputHighlighter;
 import com.raph.render.inline.InlineRenderer;
 import com.raph.tool.ToolRegistry;
 
@@ -47,9 +48,12 @@ public class Main {
                     .system(true)
                     .encoding(StandardCharsets.UTF_8)
                     .build();
-            reader = LineReaderBuilder.builder()
-                    .terminal(terminal)
-                    .build();
+            LineReaderBuilder readerBuilder = LineReaderBuilder.builder()
+                    .terminal(terminal);
+            if (config.inlineTuiEnabled()) {
+                readerBuilder.highlighter(new InlineInputHighlighter());
+            }
+            reader = readerBuilder.build();
         } catch (IOException e) {
             System.err.println("❌ 终端初始化失败: " + e.getMessage());
             System.exit(1);

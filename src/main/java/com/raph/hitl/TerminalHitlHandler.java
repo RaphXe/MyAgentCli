@@ -57,8 +57,7 @@ public class TerminalHitlHandler implements HitlHandler {
         }
 
         interaction.println("");
-        interaction.println("────────── ⚠️  HITL 审批请求 ──────────");
-        interaction.println(request.toDisplayText());
+        interaction.printPanel("HITL 审批请求", request.toDisplayText());
         return promptUntilDecision(request);
     }
 
@@ -77,7 +76,7 @@ public class TerminalHitlHandler implements HitlHandler {
 
             String input;
             try {
-                input = interaction.readLine("> ");
+                input = interaction.readLine("> ", "Enter/y approve · n reject · s skip · m modify");
             } catch (InteractionException e) {
                 if (e.type() == InteractionException.Type.INTERRUPTED) {
                     interaction.println("  [HITL] 用户取消输入，保守处理为拒绝");

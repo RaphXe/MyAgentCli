@@ -57,4 +57,13 @@ public class JLineInteractionPort implements InteractionPort {
             renderer.print(text == null ? "" : text);
         }
     }
+
+    @Override
+    public void printPanel(String title, String body) {
+        if (renderer != null) {
+            renderer.printPanel(title, body);
+        } else {
+            InteractionPort.super.printPanel(title, body);
+        }
+    }
 }

@@ -17,6 +17,7 @@ final class InlineActivityDisplay implements AutoCloseable {
 
     private final Terminal terminal;
     private final PrintStream out;
+    private final Object outputLock;
     private final ScheduledExecutorService scheduler;
     private final StringBuilder reasoning = new StringBuilder();
     private ScheduledFuture<?> tickTask;
@@ -27,9 +28,10 @@ final class InlineActivityDisplay implements AutoCloseable {
     private int frame;
     private int renderedRows;
 
-    InlineActivityDisplay(Terminal terminal, PrintStream out) {
+    InlineActivityDisplay(Terminal terminal, PrintStream out, Object outputLock) {
         this.terminal = terminal;
         this.out = out == null ? System.out : out;
+        this.outputLock = outputLock == null ? this.out : outputLock;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "inline-thinking");
             thread.setDaemon(true);
@@ -113,7 +115,7 @@ final class InlineActivityDisplay implements AutoCloseable {
         if (!active || closed) {
             return;
         }
-        synchronized (out) {
+        synchronized (outputLock) {
             clearRenderedArea();
             List<String> lines = buildLines();
             for (String line : lines) {
@@ -157,7 +159,7 @@ final class InlineActivityDisplay implements AutoCloseable {
     }
 
     private void clearLocked() {
-        synchronized (out) {
+        synchronized (outputLock) {
             clearRenderedArea();
             out.flush();
         }
@@ -181,13 +183,64 @@ final class InlineActivityDisplay implements AutoCloseable {
         return Math.max(0L, TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - startedNanos));
     }
 
-    private static String fit(String value, int columns) {
+    static String fit(String value, int columns) {
         if (value == null) {
             return "";
         }
-        if (value.length() <= columns) {
+        if (columns <= 0) {
+            return "";
+        }
+        if (displayWidth(value) <= columns) {
             return value;
         }
-        return columns <= 3 ? value.substring(0, columns) : value.substring(0, columns - 3) + "...";
+        if (columns <= 3) {
+            return truncateByDisplayWidth(value, columns);
+        }
+        return truncateByDisplayWidth(value, columns - 3) + "...";
+    }
+
+    private static String truncateByDisplayWidth(String value, int maxColumns) {
+        StringBuilder result = new StringBuilder();
+        int used = 0;
+        for (int i = 0; i < value.length(); ) {
+            int codePoint = value.codePointAt(i);
+            int width = codePointWidth(codePoint);
+            if (used + width > maxColumns) {
+                break;
+            }
+            result.appendCodePoint(codePoint);
+            used += width;
+            i += Character.charCount(codePoint);
+        }
+        return result.toString();
+    }
+
+    static int displayWidth(String value) {
+        if (value == null || value.isEmpty()) {
+            return 0;
+        }
+        int width = 0;
+        for (int i = 0; i < value.length(); ) {
+            int codePoint = value.codePointAt(i);
+            width += codePointWidth(codePoint);
+            i += Character.charCount(codePoint);
+        }
+        return width;
+    }
+
+    private static int codePointWidth(int codePoint) {
+        if (Character.isISOControl(codePoint)) {
+            return 0;
+        }
+        Character.UnicodeScript script = Character.UnicodeScript.of(codePoint);
+        if (script == Character.UnicodeScript.HAN
+                || script == Character.UnicodeScript.HIRAGANA
+                || script == Character.UnicodeScript.KATAKANA
+                || script == Character.UnicodeScript.HANGUL
+                || (codePoint >= 0x1F300 && codePoint <= 0x1FAFF)
+                || (codePoint >= 0xFF01 && codePoint <= 0xFF60)) {
+            return 2;
+        }
+        return 1;
     }
 }

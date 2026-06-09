@@ -55,6 +55,13 @@ public interface Renderer extends AutoCloseable {
         emit(RenderEvent.line(text));
     }
 
+    default void printPanel(String title, String body) {
+        if (title != null && !title.isBlank()) {
+            println(title);
+        }
+        println(body == null ? "" : body);
+    }
+
     default void printf(String format, Object... args) {
         print(String.format(format, args));
     }

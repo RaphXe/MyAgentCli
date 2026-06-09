@@ -18,10 +18,16 @@ final class FoldableBlock {
     }
 
     FoldableBlock(PrintStream out, String collapsedHeader, List<String> expandedLines, String collapseFooter) {
+        this(out, collapsedHeader, expandedLines, collapseFooter, false);
+    }
+
+    FoldableBlock(PrintStream out, String collapsedHeader, List<String> expandedLines,
+                  String collapseFooter, boolean expanded) {
         this.out = out == null ? System.out : out;
         this.collapsedHeader = collapsedHeader == null ? "" : collapsedHeader;
         this.expandedLines = List.copyOf(expandedLines == null ? List.of() : expandedLines);
         this.collapseFooter = collapseFooter == null ? "" : collapseFooter;
+        this.expanded = expanded;
     }
 
     void renderInitial() {

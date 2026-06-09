@@ -18,6 +18,13 @@ public interface InteractionPort {
         print((text == null ? "" : text) + System.lineSeparator());
     }
 
+    default void printPanel(String title, String body) {
+        if (title != null && !title.isBlank()) {
+            println(title);
+        }
+        println(body == null ? "" : body);
+    }
+
     default boolean confirm(String prompt) throws InteractionException {
         String value = readLine(prompt);
         return value != null && ("y".equalsIgnoreCase(value.trim()) || "yes".equalsIgnoreCase(value.trim()));
