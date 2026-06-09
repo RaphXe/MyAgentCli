@@ -105,20 +105,6 @@ public final class DisplayWidth {
         return truncated + " ".repeat(targetWidth - current);
     }
 
-    /** Fit a line into {@code columns}, right-padding to fill. */
-    public static String fit(String value, int columns) {
-        if (value == null || value.isBlank()) {
-            return columns > 0 ? " ".repeat(columns) : "";
-        }
-        if (columns <= 0) {
-            return value;
-        }
-        if (of(value) <= columns) {
-            return value + " ".repeat(columns - of(value));
-        }
-        return truncate(value, columns);
-    }
-
     private static String rawTruncate(String value, int maxColumns) {
         StringBuilder result = new StringBuilder();
         int used = 0;
