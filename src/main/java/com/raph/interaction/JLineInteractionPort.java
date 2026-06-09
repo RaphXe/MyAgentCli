@@ -4,6 +4,14 @@ import com.raph.render.Renderer;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
 import org.jline.reader.UserInterruptException;
+import org.jline.terminal.Attributes;
+import org.jline.terminal.Terminal;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * JLine-backed interaction port used by the CLI.
@@ -64,6 +72,70 @@ public class JLineInteractionPort implements InteractionPort {
             renderer.printPanel(title, body);
         } else {
             InteractionPort.super.printPanel(title, body);
+        }
+    }
+
+    @Override
+    public InterruptWatcher startInterruptWatch(AtomicBoolean interrupted) {
+        if (reader == null || reader.getTerminal() == null) {
+            return InterruptWatcher.NO_OP;
+        }
+        Terminal terminal = reader.getTerminal();
+
+        Attributes savedAttrs = terminal.getAttributes();
+        log("startWatch: saved=" + fmt(savedAttrs));
+
+        Attributes rawAttrs = terminal.getAttributes();
+        rawAttrs.setLocalFlag(Attributes.LocalFlag.ICANON, false);
+        rawAttrs.setLocalFlag(Attributes.LocalFlag.ECHO, false);
+        rawAttrs.setControlChar(Attributes.ControlChar.VMIN, 1);
+        rawAttrs.setControlChar(Attributes.ControlChar.VTIME, 2);
+        terminal.setAttributes(rawAttrs);
+        log("startWatch: raw=" + fmt(terminal.getAttributes()));
+
+        Thread monitor = new Thread(() -> {
+            try {
+                while (!Thread.currentThread().isInterrupted()) {
+                    int b = System.in.read();
+                    if (b == -1) break;
+                    if (b == 0x07) {
+                        log("Ctrl+G detected via System.in");
+                        interrupted.set(true);
+                        break;
+                    }
+                }
+            } catch (IOException e) {
+                log("monitor IO error: " + e.getMessage());
+            }
+        }, "interrupt-monitor");
+        monitor.setDaemon(true);
+        monitor.start();
+
+        return () -> {
+            log("stopWatch: restoring " + fmt(savedAttrs));
+            terminal.setAttributes(savedAttrs);
+            monitor.interrupt();
+        };
+    }
+
+    private static String fmt(Attributes a) {
+        if (a == null) return "null";
+        try {
+            var lf = a.getLocalFlags();
+            return "ICANON=" + (lf != null && lf.contains(Attributes.LocalFlag.ICANON))
+                    + " ECHO=" + (lf != null && lf.contains(Attributes.LocalFlag.ECHO))
+                    + " VMIN=" + a.getControlChar(Attributes.ControlChar.VMIN)
+                    + " VTIME=" + a.getControlChar(Attributes.ControlChar.VTIME);
+        } catch (Exception e) {
+            return "err:" + e.getMessage();
+        }
+    }
+
+    private static void log(String msg) {
+        try (PrintWriter pw = new PrintWriter(new FileWriter("/tmp/interrupt-debug.log", true))) {
+            pw.println(Instant.now() + " [" + Thread.currentThread().getName() + "] " + msg);
+            pw.flush();
+        } catch (IOException ignored) {
         }
     }
 }

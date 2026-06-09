@@ -6,6 +6,7 @@ import com.raph.agent.PlanExecuteAgent;
 import com.raph.hitl.TerminalHitlHandler;
 import com.raph.interaction.InteractionException;
 import com.raph.interaction.InteractionPort;
+import com.raph.interaction.InterruptWatcher;
 import com.raph.llm.LlmClientManager;
 import com.raph.llm.LlmConfig;
 import com.raph.memory.ContextUsage;
@@ -28,6 +29,14 @@ import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TuiSession {
     private static final String PROMPT_CONFIRM = "❓ 是否执行此计划? [y/n]: ";
@@ -43,7 +52,9 @@ public class TuiSession {
     private final MCPServerManager mcpServerManager;
     private final Agent agent;
     private final PlanExecuteAgent planAgent;
-    private AgentRuntime teamRuntime;
+    private final AgentRuntime teamRuntime;
+    private final AtomicBoolean promptInterrupt;
+    private final ExecutorService bgExecutor;
     private PlanView lastPlanView;
     private SessionMode mode = SessionMode.NORMAL;
     private boolean exitRequested;
@@ -56,7 +67,8 @@ public class TuiSession {
                       MemoryManager memoryManager,
                       MCPServerManager mcpServerManager,
                       Agent agent,
-                      PlanExecuteAgent planAgent) {
+                      PlanExecuteAgent planAgent,
+                      AtomicBoolean promptInterrupt) {
         this.interaction = interaction;
         this.renderer = renderer;
         this.llmClient = llmClient;
@@ -66,10 +78,17 @@ public class TuiSession {
         this.mcpServerManager = mcpServerManager;
         this.agent = agent;
         this.planAgent = planAgent;
+        this.teamRuntime = new AgentRuntime(llmClient, toolRegistry, renderer);
+        this.promptInterrupt = promptInterrupt;
+        this.bgExecutor = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "tui-bg");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     public void run() {
-        renderer.println("💡 提示: 输入 '/connect <api_base>' 连接模型, '/model' 切换模型, '/plan' 切换计划模式, '/team' 切换团队模式, '/mcp' 查看 MCP, '/skills' 查看 skill, '/hitl on|off' 切换人工审批, '/save <描述>' 保存记忆, '/clear' 清空历史, '/exit' 退出或返回普通模式\n");
+        renderer.println("💡 提示: 输入 '/connect <api_base>' 连接模型, '/model' 切换模型, '/plan' 切换计划模式, '/team' 切换团队模式, '/mcp' 查看 MCP, '/skills' 查看 skill, '/hitl on|off' 切换人工审批, '/save <描述>' 保存记忆, '/clear' 清空历史, '/exit' 退出或返回普通模式。团队执行中按 Ctrl+G 可中断。\n");
 
         while (true) {
             refreshRendererView();
@@ -208,14 +227,12 @@ public class TuiSession {
                     .append(" failed ").append(lastPlanView.failedTasks())
                     .append("\n");
         }
-        if (teamRuntime != null) {
-            var teamView = teamRuntime.currentTeamView();
-            sb.append("- team: ").append(teamView.status())
-                    .append(" round ").append(teamView.currentRound()).append("/").append(teamView.maxRounds())
-                    .append(" steps ").append(teamView.agentSteps()).append("/").append(teamView.maxAgentSteps())
-                    .append(" active ").append(teamView.activeTasks())
-                    .append("\n");
-        }
+        var teamView = teamRuntime.currentTeamView();
+        sb.append("- team: ").append(teamView.status())
+                .append(" round ").append(teamView.currentRound()).append("/").append(teamView.maxRounds())
+                .append(" steps ").append(teamView.agentSteps()).append("/").append(teamView.maxAgentSteps())
+                .append(" active ").append(teamView.activeTasks())
+                .append("\n");
         sb.append("\nMCP:\n").append(mcpServerManager.statusReport());
         renderer.println(sb.append("\n").toString());
     }
@@ -469,14 +486,49 @@ public class TuiSession {
     private void handleNormalInput(String input) {
         renderer.beginTurn();
         renderer.emit(RenderEvent.activity("agent", "🤔 思考中..."));
-        String response;
+
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        InterruptWatcher watcher = interaction.startInterruptWatch(cancelled);
+
         Renderer.StreamHandle streamRenderer = renderer.contentStream("🤖 Agent: ");
+        Future<String> future = bgExecutor.submit(() -> agent.run(input, streamRenderer));
+
+        String response = null;
+        boolean interrupted = false;
         try {
-            response = agent.run(input, streamRenderer);
-        } catch (IOException e) {
-            renderer.emit(RenderEvent.error("agent", "\n❌ Agent 执行失败: " + e.getMessage() + "\n"));
+            while (!future.isDone()) {
+                try {
+                    response = future.get(400, TimeUnit.MILLISECONDS);
+                } catch (TimeoutException e) {
+                    if (cancelled.get()) {
+                        future.cancel(true);
+                        interrupted = true;
+                        break;
+                    }
+                }
+            }
+            if (!interrupted && response == null) {
+                response = future.get();
+            }
+        } catch (CancellationException e) {
+            interrupted = true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            interrupted = true;
+        } catch (ExecutionException e) {
+            watcher.close();
+            Throwable cause = e.getCause();
+            renderer.emit(RenderEvent.error("agent", "\n❌ Agent 执行失败: " + cause.getMessage() + "\n"));
+            return;
+        } finally {
+            watcher.close();
+        }
+
+        if (interrupted) {
+            renderer.println("\n⏸ 已中断当前输出。\n");
             return;
         }
+
         if (streamRenderer.hasContent()) {
             renderer.println("");
         } else {
@@ -496,9 +548,7 @@ public class TuiSession {
         return switch (mode) {
             case NORMAL -> TuiStatusLine.normalContextUsage(memoryManager);
             case PLAN -> planAgent.currentContextUsage();
-            case TEAM -> teamRuntime == null
-                    ? new ContextUsage("团队模式", 0, memoryManager.getTokenBudget().getMaxContextTokens(), "未启动")
-                    : teamRuntime.currentContextUsage();
+            case TEAM -> teamRuntime.currentContextUsage();
         };
     }
 
@@ -654,10 +704,7 @@ public class TuiSession {
                 renderer.println("🗑️ 普通模式历史、token 统计和本次会话授权已清空\n");
             }
             case TEAM -> {
-                if (teamRuntime != null) {
-                    teamRuntime.close();
-                    teamRuntime = null;
-                }
+                teamRuntime.softReset();
                 toolRegistry.clearSessionState();
                 hitlHandler.clearApprovedAll();
                 renderer.println("🗑️ 团队模式会话记忆已清空\n");
@@ -685,26 +732,67 @@ public class TuiSession {
     }
 
     private void runTeam(String teamTask) {
-        if (teamTask.isEmpty()) {
+        if (teamTask.isBlank()) {
             renderer.println("❌ 用法: /team <任务内容>\n");
             return;
         }
         renderer.beginTurn();
-        renderer.println("👥 启动自治 Multi-Agent 协作...\n");
-        try {
-            String response = teamRuntime().run(teamTask);
-            refreshRendererView();
-            renderer.println(response);
-        } catch (IOException e) {
-            renderer.println("❌ 多 Agent 执行失败: " + e.getMessage() + "\n");
-        }
-    }
+        renderer.println("👥 启动自治 Multi-Agent 协作... (按 Ctrl+G 中断)\n");
 
-    private AgentRuntime teamRuntime() {
-        if (teamRuntime == null) {
-            teamRuntime = new AgentRuntime(llmClient, toolRegistry, renderer);
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        InterruptWatcher watcher = interaction.startInterruptWatch(cancelled);
+
+        try {
+            AgentRuntime.TeamRunResult result = teamRuntime.runInterruptibly(teamTask, cancelled);
+            watcher.close();
+
+            while (result.interrupted()) {
+                renderer.println("\n" + "═".repeat(50));
+                renderer.println("⏸  团队已中断 (Round " + result.interruptedAtRound() + ")");
+                renderer.println("═".repeat(50));
+                renderer.println("  输入反馈理由 → Coordinator 将根据反馈调整方向后继续");
+                renderer.println("  直接回车      → 无理由继续执行");
+                renderer.println("  按 Ctrl+G     → 退出团队模式，返回普通模式\n");
+                cancelled.set(false);
+
+                String reason;
+                try {
+                    renderer.beforeInput();
+                    reason = interaction.readLine(
+                            renderer.inputPrompt("💬 反馈理由: "),
+                            renderer.inputRightPrompt());
+                } catch (InteractionException e) {
+                    renderer.println("\n⏏ 退出团队模式。\n");
+                    mode = SessionMode.NORMAL;
+                    return;
+                } finally {
+                    renderer.afterInput();
+                }
+
+                if (reason == null || reason.isBlank()) {
+                    renderer.println("⏯ 继续执行...\n");
+                    teamRuntime.injectInterruptMessage("");
+                } else {
+                    renderer.println("📤 反馈已发送至 Coordinator，继续执行...\n");
+                    teamRuntime.injectInterruptMessage(reason);
+                }
+
+                cancelled.set(false);
+                watcher = interaction.startInterruptWatch(cancelled);
+                result = teamRuntime.runInterruptibly(teamTask, cancelled);
+                watcher.close();
+            }
+
+            refreshRendererView();
+            if (result.finalAnswer() != null) {
+                renderer.println(result.finalAnswer());
+            }
+        } catch (IOException e) {
+            watcher.close();
+            renderer.println("❌ 多 Agent 执行失败: " + e.getMessage() + "\n");
+        } finally {
+            watcher.close();
         }
-        return teamRuntime;
     }
 
     private void saveMemory(String description) {
@@ -809,8 +897,6 @@ public class TuiSession {
         if (lastPlanView != null) {
             viewAwareRenderer.updatePlanView(lastPlanView);
         }
-        if (teamRuntime != null) {
-            viewAwareRenderer.updateTeamView(teamRuntime.currentTeamView());
-        }
+        viewAwareRenderer.updateTeamView(teamRuntime.currentTeamView());
     }
 }

@@ -32,7 +32,8 @@ public record AgentMessage(
         APPROVE,
         REJECT,
         BLOCKED,
-        FINAL
+        FINAL,
+        INTERRUPT
     }
 
     public AgentMessage {

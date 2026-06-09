@@ -1,5 +1,7 @@
 package com.raph.interaction;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 /**
  * User interaction boundary for terminal-style prompts.
  */
@@ -28,5 +30,9 @@ public interface InteractionPort {
     default boolean confirm(String prompt) throws InteractionException {
         String value = readLine(prompt);
         return value != null && ("y".equalsIgnoreCase(value.trim()) || "yes".equalsIgnoreCase(value.trim()));
+    }
+
+    default InterruptWatcher startInterruptWatch(AtomicBoolean interrupted) {
+        return InterruptWatcher.NO_OP;
     }
 }

@@ -21,10 +21,12 @@ import com.raph.tool.ToolRegistry;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
 import org.jline.reader.Reference;
+import org.jline.reader.UserInterruptException;
 import org.jline.keymap.KeyMap;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
@@ -69,6 +71,9 @@ public class Main {
 
         InteractionPort interaction = new JLineInteractionPort(reader, renderer);
 
+        AtomicBoolean promptInterrupt = new AtomicBoolean(false);
+        bindCtrlGToInterrupt(reader, promptInterrupt);
+
         TerminalHitlHandler hitlHandler = new TerminalHitlHandler(false, interaction);
         ToolRegistry toolRegistry = new HitlToolRegistry(hitlHandler);
         MCPServerManager mcpServerManager = MCPServerManager.fromDefaultConfig(toolRegistry, renderer::println);
@@ -84,7 +89,7 @@ public class Main {
                 renderer.println("⚠ 未配置 LLM。请使用 /connect <api_base> 连接 OpenAI-compatible provider。\n");
             }
             new TuiSession(interaction, renderer, llmClientManager, toolRegistry, hitlHandler,
-                    memoryManager, mcpServerManager, agent, planAgent).run();
+                    memoryManager, mcpServerManager, agent, planAgent, promptInterrupt).run();
         } finally {
             mcpServerManager.close();
             renderer.close();
@@ -116,6 +121,24 @@ public class Main {
             KeyMap<org.jline.reader.Binding> keyMap = reader.getKeyMaps().get(mapName);
             if (keyMap != null) {
                 keyMap.bind(reference, ctrlO);
+            }
+        }
+    }
+
+    private static void bindCtrlGToInterrupt(LineReader reader, AtomicBoolean interrupted) {
+        if (reader == null) {
+            return;
+        }
+        reader.getWidgets().put("paicli-interrupt", () -> {
+            interrupted.set(true);
+            throw new UserInterruptException("Ctrl+G");
+        });
+        Reference reference = new Reference("paicli-interrupt");
+        String ctrlG = String.valueOf((char) 7);
+        for (String mapName : new String[]{LineReader.MAIN, LineReader.EMACS, LineReader.VIINS}) {
+            KeyMap<org.jline.reader.Binding> keyMap = reader.getKeyMaps().get(mapName);
+            if (keyMap != null) {
+                keyMap.bind(reference, ctrlG);
             }
         }
     }

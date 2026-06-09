@@ -23,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 自治 Multi-Agent Runtime：负责投递消息、维护 TaskBoard、限制轮数和执行 Agent actions。
@@ -48,6 +49,8 @@ public class AgentRuntime {
     private String finalAnswer;
     private String currentGoal = "";
     private String runtimeStatus = "idle";
+    private String threadId;
+    private boolean resuming;
     private int currentRound;
     private int agentSteps;
 
@@ -87,34 +90,62 @@ public class AgentRuntime {
 
     public record RuntimeView(String goal, String taskBoard, String recentTranscript) {}
 
-    public String run(String goal) throws IOException {
-        finalAnswer = null;
-        currentGoal = goal == null ? "" : goal;
-        runtimeStatus = "running";
-        currentRound = 0;
-        agentSteps = 0;
-        messageBus.reset();
-        for (TeamAgent agent : agents.values()) {
-            agent.reset();
+    public record TeamRunResult(String finalAnswer, boolean interrupted, int interruptedAtRound) {
+        public static TeamRunResult completed(String answer) {
+            return new TeamRunResult(answer, false, -1);
         }
-        String threadId = "team-" + System.currentTimeMillis();
-        messageBus.send(AgentMessage.of(threadId, "user", "coordinator", AgentMessage.Type.GOAL, goal));
+
+        public static TeamRunResult interrupted(int round) {
+            return new TeamRunResult(null, true, round);
+        }
+    }
+
+    public String run(String goal) throws IOException {
+        TeamRunResult result = runInterruptibly(goal, new AtomicBoolean(false));
+        return result.finalAnswer() != null ? result.finalAnswer() : buildFallbackSummary();
+    }
+
+    public TeamRunResult runInterruptibly(String goal, AtomicBoolean cancelled) throws IOException {
+        if (!resuming) {
+            finalAnswer = null;
+            currentGoal = goal == null ? "" : goal;
+            runtimeStatus = "running";
+            currentRound = 0;
+            agentSteps = 0;
+            messageBus.reset();
+            for (TeamAgent agent : agents.values()) {
+                agent.reset();
+            }
+            threadId = "team-" + System.currentTimeMillis();
+            messageBus.send(AgentMessage.of(threadId, "user", "coordinator", AgentMessage.Type.GOAL, goal));
+        }
+        resuming = false;
 
         StringBuilder log = new StringBuilder();
-        logLine(log, "👥 自治 Multi-Agent 团队启动");
-        logLine(log, "目标：" + goal);
-        logLine(log, "团队：" + String.join(", ", agents.keySet()));
-        logLine(log, "上限：round=" + maxRounds + ", agentSteps=" + MAX_AGENT_STEPS + "\n");
+        if (currentRound == 0) {
+            logLine(log, "👥 自治 Multi-Agent 团队启动");
+            logLine(log, "目标：" + goal);
+            logLine(log, "团队：" + String.join(", ", agents.keySet()));
+            logLine(log, "上限：round=" + maxRounds + ", agentSteps=" + MAX_AGENT_STEPS + "\n");
+        }
 
         int idleRounds = 0;
         try {
-            for (int round = 1; round <= maxRounds && agentSteps < MAX_AGENT_STEPS; round++) {
+            for (int round = currentRound == 0 ? 1 : currentRound; round <= maxRounds && agentSteps < MAX_AGENT_STEPS; round++) {
+                if (cancelled != null && cancelled.get()) {
+                    runtimeStatus = "interrupted";
+                    return TeamRunResult.interrupted(round);
+                }
                 currentRound = round;
                 boolean changed = false;
                 logLine(log, "┌─ Round " + round + " ─────────────────────────");
                 logLine(log, "│ 任务板快照：\n" + indent(taskBoard.renderSummary(), "│   "));
 
                 for (TeamAgent agent : agents.values()) {
+                    if (cancelled != null && cancelled.get()) {
+                        runtimeStatus = "interrupted";
+                        return TeamRunResult.interrupted(round);
+                    }
                     if (agentSteps >= MAX_AGENT_STEPS) {
                         logLine(log, "│ ⚠ 达到 Agent step 上限，停止继续唤醒。 ");
                         break;
@@ -131,8 +162,12 @@ public class AgentRuntime {
 
                     agentSteps++;
                     logLine(log, "│ ▶ step#" + agentSteps + " " + agent.id() + " (" + agent.role() + ") inbox=" + inbox.size());
-                    AgentDecision decision = callAgentWithHeartbeat(agent, view(goal), inbox, log);
-                    changed |= applyDecision(threadId, agent, decision, log);
+                    AgentDecision decision = callAgentWithHeartbeat(agent, view(goal), inbox, log, cancelled);
+                    if (decision == null) {
+                        runtimeStatus = "interrupted";
+                        return TeamRunResult.interrupted(round);
+                    }
+                    changed |= applyDecision(threadId, agent, decision, log, cancelled);
 
                     if (finalAnswer != null) {
                         logLine(log, "│ ✅ 已有最终答案，提前收束。 ");
@@ -164,11 +199,21 @@ public class AgentRuntime {
             }
             runtimeStatus = "completed";
             logLine(log, "✅ 团队输出：\n" + finalAnswer);
-            return "✅ Multi-Agent 自治调度结束。\n\n" + finalAnswer;
+            return TeamRunResult.completed("✅ Multi-Agent 自治调度结束。\n\n" + finalAnswer);
         } catch (IOException | RuntimeException e) {
             runtimeStatus = "failed";
             throw e;
         }
+    }
+
+    public void injectInterruptMessage(String reason) {
+        if (threadId == null) return;
+        resuming = true;
+        String content = reason != null && !reason.isBlank()
+                ? "用户中断当前执行，理由：" + reason + "\n请根据此反馈调整方向，重新评估任务分配和优先级。"
+                : "用户中断当前执行。请重新评估当前进度，判断是否需要调整任务分配、取消低效任务或重新委派。";
+        messageBus.send(AgentMessage.of(threadId, "user", "coordinator", AgentMessage.Type.INTERRUPT, content));
+        runtimeStatus = "running";
     }
 
     public ContextUsage currentContextUsage() {
@@ -208,8 +253,23 @@ public class AgentRuntime {
         sharedExecutor.shutdownNow();
     }
 
+    public void softReset() {
+        finalAnswer = null;
+        currentGoal = "";
+        runtimeStatus = "idle";
+        threadId = null;
+        resuming = false;
+        currentRound = 0;
+        agentSteps = 0;
+        messageBus.reset();
+        for (TeamAgent agent : agents.values()) {
+            agent.reset();
+        }
+    }
+
     private AgentDecision callAgentWithHeartbeat(TeamAgent agent, RuntimeView view,
-                                                 List<AgentMessage> inbox, StringBuilder log) throws IOException {
+                                                 List<AgentMessage> inbox, StringBuilder log,
+                                                 AtomicBoolean cancelled) throws IOException {
         long start = System.currentTimeMillis();
         Future<AgentDecision> future = sharedExecutor.submit(() -> agent.step(
                 view,
@@ -219,6 +279,11 @@ public class AgentRuntime {
         ));
         try {
             while (true) {
+                if (cancelled != null && cancelled.get()) {
+                    future.cancel(true);
+                    logLine(log, "│   ⏸ " + agent.id() + " 被用户中断");
+                    return null;
+                }
                 try {
                     AgentDecision decision = future.get(HEARTBEAT_SECONDS, TimeUnit.SECONDS);
                     long elapsed = (System.currentTimeMillis() - start) / 1000;
@@ -227,6 +292,11 @@ public class AgentRuntime {
                             + ", status=" + (decision == null ? "null" : decision.status()));
                     return decision;
                 } catch (TimeoutException ignored) {
+                    if (cancelled != null && cancelled.get()) {
+                        future.cancel(true);
+                        logLine(log, "│   ⏸ " + agent.id() + " 被用户中断");
+                        return null;
+                    }
                     long elapsed = (System.currentTimeMillis() - start) / 1000;
                     logLine(log, "│   … " + agent.id() + " LLM/工具调用中，已等待 " + elapsed + "s");
                 }
@@ -263,7 +333,8 @@ public class AgentRuntime {
         if (agent.role() == AgentRole.Coordinator) return inbox;
         List<AgentMessage> filtered = new ArrayList<>();
         for (AgentMessage message : inbox) {
-            if (message.type() == AgentMessage.Type.FINAL || message.type() == AgentMessage.Type.REJECT) {
+            if (message.type() == AgentMessage.Type.FINAL || message.type() == AgentMessage.Type.REJECT
+                    || message.type() == AgentMessage.Type.INTERRUPT) {
                 filtered.add(message);
                 continue;
             }
@@ -322,7 +393,8 @@ public class AgentRuntime {
         return agent.role() == AgentRole.Coordinator && taskBoard.allTerminal() && finalAnswer == null;
     }
 
-    private boolean applyDecision(String threadId, TeamAgent agent, AgentDecision decision, StringBuilder log) {
+    private boolean applyDecision(String threadId, TeamAgent agent, AgentDecision decision,
+                                   StringBuilder log, AtomicBoolean cancelled) {
         boolean changed = false;
         if (decision == null) return false;
 
@@ -338,7 +410,7 @@ public class AgentRuntime {
         List<SubAgentRequestSpec> subAgentRequests = collectSubAgentRequests(actions);
         if (!subAgentRequests.isEmpty()) {
             if (agent.role() == AgentRole.Researcher || agent.role() == AgentRole.Coder) {
-                changed |= runSubAgents(threadId, agent, subAgentRequests, log);
+                changed |= runSubAgents(threadId, agent, subAgentRequests, log, cancelled);
             } else {
                 logLine(log, "│   ⊘ spawn_subagent ignored for " + agent.id() + " (" + agent.role()
                         + "); only Researcher/Coder can spawn subagents");
@@ -509,7 +581,8 @@ public class AgentRuntime {
     }
 
     private boolean runSubAgents(String threadId, TeamAgent parentAgent,
-                                 List<SubAgentRequestSpec> requests, StringBuilder log) {
+                                 List<SubAgentRequestSpec> requests, StringBuilder log,
+                                 AtomicBoolean cancelled) {
         CompletionService<SubAgentRunResult> completionService = new ExecutorCompletionService<>(sharedExecutor);
         List<Future<SubAgentRunResult>> futures = new ArrayList<>();
 
@@ -535,13 +608,23 @@ public class AgentRuntime {
         int completed = 0;
         try {
             while (completed < futures.size()) {
+                if (cancelled != null && cancelled.get()) {
+                    logLine(log, "│   ⏸ 子Agent批次被用户中断");
+                    break;
+                }
                 long remainingNanos = deadlineNanos - System.nanoTime();
                 if (remainingNanos <= 0) {
                     break;
                 }
-                Future<SubAgentRunResult> future = completionService.poll(remainingNanos, TimeUnit.NANOSECONDS);
+                Future<SubAgentRunResult> future = completionService.poll(
+                        Math.min(remainingNanos, TimeUnit.SECONDS.toNanos(HEARTBEAT_SECONDS)),
+                        TimeUnit.NANOSECONDS);
                 if (future == null) {
-                    break;
+                    if (cancelled != null && cancelled.get()) {
+                        logLine(log, "│   ⏸ 子Agent批次被用户中断");
+                        break;
+                    }
+                    continue;
                 }
                 completed++;
                 SubAgentRunResult result;
@@ -796,8 +879,8 @@ public class AgentRuntime {
         List<AgentMessage> inbox = List.of(AgentMessage.of(threadId, "runtime", "coordinator",
                 AgentMessage.Type.FINAL,
                 "请立即基于当前任务板和团队 transcript 输出 final_answer。即使任务未全部 DONE，也要总结已有发现、未完成项和下一步建议。"));
-        AgentDecision decision = callAgentWithHeartbeat(coordinator, view(goal), inbox, log);
-        applyDecision(threadId, coordinator, decision, log);
+        AgentDecision decision = callAgentWithHeartbeat(coordinator, view(goal), inbox, log, null);
+        applyDecision(threadId, coordinator, decision, log, null);
     }
 
     private String executeToolAction(String toolName, AgentDecision.Action action) {
