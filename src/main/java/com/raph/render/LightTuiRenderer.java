@@ -25,6 +25,7 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
     private PlanView planView;
     private TeamView teamView;
     private Theme theme = Theme.LIGHT;
+    private int lastWidth = -1;
 
     public enum Theme {
         LIGHT,
@@ -51,6 +52,7 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
         if (event == null) {
             return;
         }
+        ensureWidthStable();
         switch (event.type()) {
             case STATUS -> renderStatus(event.text());
             case ACTIVITY -> renderActivity(event.scope(), event.text());
@@ -138,7 +140,7 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
     private void renderActivity(String scope, String text) {
         String line = "[" + blankToDefault(scope, "activity") + "] " + normalizeLine(text);
         rememberActivity(line);
-        out.println("› " + truncateToWidth(line, width() - 2));
+        out.println("› " + DisplayWidth.truncate(line, width() - 2));
         out.flush();
     }
 
@@ -168,7 +170,7 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
                 out.println("│ team │");
                 continue;
             }
-            int contentWidth = width() - displayWidth("│ team │ ");
+            int contentWidth = width() - DisplayWidth.of("│ team │ ");
             for (String chunk : wrapToWidth(line, contentWidth)) {
                 out.println("│ team │ " + chunk);
             }
@@ -189,7 +191,7 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
     }
 
     private void renderError(String scope, String text) {
-        out.println("! " + truncateToWidth("[" + blankToDefault(scope, "error") + "] " + normalizeLine(text), width() - 2));
+        out.println("! " + DisplayWidth.truncate("[" + blankToDefault(scope, "error") + "] " + normalizeLine(text), width() - 2));
         out.flush();
     }
 
@@ -210,9 +212,17 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
         return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, value <= 0 ? DEFAULT_WIDTH : value));
     }
 
+    private void ensureWidthStable() {
+        int current = width();
+        if (lastWidth > 0 && lastWidth != current) {
+            drawHeader();
+        }
+        lastWidth = current;
+    }
+
     private static String boxLine(String text, int width) {
-        String content = truncateToWidth(text == null ? "" : text, width - 2);
-        return "│" + padRightToWidth(content, width - 2) + "│";
+        String content = DisplayWidth.truncate(text == null ? "" : text, width - 2);
+        return "│" + DisplayWidth.padRight(content, width - 2) + "│";
     }
 
     private void printBoxLines(String text, int width) {
@@ -225,7 +235,7 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
         java.util.List<String> result = new java.util.ArrayList<>();
         int contentWidth = Math.max(12, width - 2);
         for (String chunk : wrapToWidth(text == null ? "" : text, contentWidth)) {
-            result.add("│" + padRightToWidth(chunk, contentWidth) + "│");
+            result.add("│" + DisplayWidth.padRight(chunk, contentWidth) + "│");
         }
         return result;
     }
@@ -257,7 +267,7 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
         int width = Math.max(12, maxWidth);
         java.util.List<String> lines = new java.util.ArrayList<>();
         String remaining = value.trim();
-        while (displayWidth(remaining) > width) {
+        while (DisplayWidth.of(remaining) > width) {
             int breakAt = findBreakPointByWidth(remaining, width);
             lines.add(remaining.substring(0, breakAt).stripTrailing());
             remaining = remaining.substring(breakAt).stripLeading();
@@ -269,7 +279,7 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
     }
 
     private static int findBreakPointByWidth(String value, int width) {
-        int breakAt = indexForDisplayWidth(value, width);
+        int breakAt = rawIndexForDisplayWidth(value, width);
         for (int i = breakAt; i > Math.max(0, breakAt - 24); i--) {
             if (Character.isWhitespace(value.charAt(i - 1))) {
                 return i;
@@ -278,85 +288,23 @@ public class LightTuiRenderer extends PlainRenderer implements ViewAwareRenderer
         return breakAt;
     }
 
-    private static String blankToDefault(String value, String defaultValue) {
-        return value == null || value.isBlank() ? defaultValue : value;
-    }
-
-    private static String truncateToWidth(String value, int maxWidth) {
-        if (value == null) {
-            return "";
-        }
-        if (maxWidth <= 0 || displayWidth(value) <= maxWidth) {
-            return value;
-        }
-        if (maxWidth <= 3) {
-            return value.substring(0, indexForDisplayWidth(value, maxWidth));
-        }
-        return value.substring(0, indexForDisplayWidth(value, maxWidth - 3)) + "...";
-    }
-
-    private static String padRightToWidth(String value, int width) {
-        String truncated = truncateToWidth(value, width);
-        int displayWidth = displayWidth(truncated);
-        if (displayWidth >= width) {
-            return truncated;
-        }
-        return truncated + " ".repeat(width - displayWidth);
-    }
-
-    private static int indexForDisplayWidth(String value, int maxWidth) {
-        int width = 0;
-        int index = 0;
-        while (index < value.length()) {
-            int codePoint = value.codePointAt(index);
-            int charWidth = charDisplayWidth(codePoint);
-            if (width + charWidth > maxWidth) {
+    private static int rawIndexForDisplayWidth(String value, int maxWidth) {
+        int w = 0;
+        int idx = 0;
+        while (idx < value.length()) {
+            int cp = value.codePointAt(idx);
+            int cw = DisplayWidth.of(cp);
+            if (w + cw > maxWidth) {
                 break;
             }
-            width += charWidth;
-            index += Character.charCount(codePoint);
+            w += cw;
+            idx += Character.charCount(cp);
         }
-        return index;
+        return idx;
     }
 
-    private static int displayWidth(String value) {
-        if (value == null || value.isEmpty()) {
-            return 0;
-        }
-        int width = 0;
-        for (int i = 0; i < value.length(); ) {
-            int codePoint = value.codePointAt(i);
-            width += charDisplayWidth(codePoint);
-            i += Character.charCount(codePoint);
-        }
-        return width;
-    }
-
-    private static int charDisplayWidth(int codePoint) {
-        if (codePoint == '\n' || codePoint == '\r' || codePoint == '\t') {
-            return 1;
-        }
-        if (Character.isISOControl(codePoint)) {
-            return 0;
-        }
-        Character.UnicodeScript script = Character.UnicodeScript.of(codePoint);
-        if (script == Character.UnicodeScript.HAN
-                || script == Character.UnicodeScript.HIRAGANA
-                || script == Character.UnicodeScript.KATAKANA
-                || script == Character.UnicodeScript.HANGUL) {
-            return 2;
-        }
-        Character.UnicodeBlock block = Character.UnicodeBlock.of(codePoint);
-        if (block == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION
-                || block == Character.UnicodeBlock.HALFWIDTH_AND_FULLWIDTH_FORMS
-                || block == Character.UnicodeBlock.GENERAL_PUNCTUATION
-                || block == Character.UnicodeBlock.MISCELLANEOUS_SYMBOLS
-                || block == Character.UnicodeBlock.MISCELLANEOUS_SYMBOLS_AND_PICTOGRAPHS
-                || block == Character.UnicodeBlock.EMOTICONS
-                || block == Character.UnicodeBlock.TRANSPORT_AND_MAP_SYMBOLS) {
-            return 2;
-        }
-        return 1;
+    private static String blankToDefault(String value, String defaultValue) {
+        return value == null || value.isBlank() ? defaultValue : value;
     }
 
     private static String repeat(String value, int count) {

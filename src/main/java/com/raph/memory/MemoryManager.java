@@ -5,6 +5,7 @@ import com.raph.llm.LlmClient;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -150,10 +151,10 @@ public class MemoryManager {
         ContextCompressor.CompressResult result = contextCompressor.compress(conversation, llmClient);
         if (result.performed()) {
             int cutoff = result.removedCount();
-            while (conversation.size() > cutoff) {
-                conversation.remove(0);
-            }
-            conversation.add(0, result.summaryMessage());
+            List<LlmClient.Message> recent = new ArrayList<>(conversation.subList(cutoff, conversation.size()));
+            conversation.clear();
+            conversation.add(result.summaryMessage());
+            conversation.addAll(recent);
             tokenBudget.updateCompressedHistoryTokens(result.estimatedCompressedTokens());
         }
         return result;

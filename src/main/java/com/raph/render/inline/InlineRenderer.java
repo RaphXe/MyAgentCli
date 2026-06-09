@@ -28,6 +28,7 @@ public class InlineRenderer extends PlainRenderer {
     private final Object transcriptLock = new Object();
     private final List<TranscriptEntry> transcript = new ArrayList<>();
     private volatile LineReader lineReader;
+    private volatile int lastColumns = -1;
     private int renderedRows;
     private boolean redrawing;
     private boolean started;
@@ -172,6 +173,12 @@ public class InlineRenderer extends PlainRenderer {
             finishStreamText();
             return;
         }
+        if (event.type() == RenderEvent.Type.TEAM_LOG || event.type() == RenderEvent.Type.ERROR) {
+            activityDisplay.end();
+            String text = event.text() == null ? "" : event.text();
+            appendTranscriptEntry(new TextEntry(text + "\n"));
+            return;
+        }
         super.emit(event);
     }
 
@@ -204,7 +211,28 @@ public class InlineRenderer extends PlainRenderer {
         blockRegistry.clear();
     }
 
+    private void ensureSizeStable() {
+        if (redrawing) {
+            return;
+        }
+        int columns = TerminalCapabilities.safeSize(terminal).getColumns();
+        int prev = lastColumns;
+        if (prev > 0 && prev != columns) {
+            LineReader reader = activeReader();
+            if (reader != null) {
+                reader.callWidget(LineReader.REDRAW_LINE);
+                if (statusBar != null) {
+                    statusBar.beforeInput();
+                }
+            } else {
+                redrawTranscript();
+            }
+        }
+        lastColumns = columns;
+    }
+
     private void printAbove(String text) {
+        ensureSizeStable();
         LineReader reader = activeReader();
         if (reader != null) {
             synchronized (outputLock) {
@@ -333,7 +361,7 @@ public class InlineRenderer extends PlainRenderer {
                 i += Character.charCount(codePoint);
                 continue;
             }
-            int width = displayWidth(codePoint);
+            int width = com.raph.render.DisplayWidth.of(codePoint);
             if (width > 0) {
                 sawVisible = true;
                 col += width;
@@ -364,22 +392,6 @@ public class InlineRenderer extends PlainRenderer {
             }
         }
         return escIndex + 1;
-    }
-
-    private static int displayWidth(int codePoint) {
-        if (Character.isISOControl(codePoint)) {
-            return 0;
-        }
-        Character.UnicodeScript script = Character.UnicodeScript.of(codePoint);
-        if (script == Character.UnicodeScript.HAN
-                || script == Character.UnicodeScript.HIRAGANA
-                || script == Character.UnicodeScript.KATAKANA
-                || script == Character.UnicodeScript.HANGUL
-                || (codePoint >= 0x1F300 && codePoint <= 0x1FAFF)
-                || (codePoint >= 0xFF01 && codePoint <= 0xFF60)) {
-            return 2;
-        }
-        return 1;
     }
 
     private LineReader activeReader() {

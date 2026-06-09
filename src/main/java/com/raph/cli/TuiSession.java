@@ -654,7 +654,10 @@ public class TuiSession {
                 renderer.println("🗑️ 普通模式历史、token 统计和本次会话授权已清空\n");
             }
             case TEAM -> {
-                teamRuntime = null;
+                if (teamRuntime != null) {
+                    teamRuntime.close();
+                    teamRuntime = null;
+                }
                 toolRegistry.clearSessionState();
                 hitlHandler.clearApprovedAll();
                 renderer.println("🗑️ 团队模式会话记忆已清空\n");

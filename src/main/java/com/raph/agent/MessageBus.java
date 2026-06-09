@@ -65,4 +65,9 @@ public class MessageBus {
         int from = Math.max(0, transcript.size() - limit);
         return List.copyOf(transcript.subList(from, transcript.size()));
     }
+
+    public synchronized void reset() {
+        transcript.clear();
+        inboxes.values().forEach(Queue::clear);
+    }
 }

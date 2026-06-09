@@ -89,6 +89,14 @@ public class TeamAgent {
         return AgentDecision.fallback("达到工具调用轮数上限(" + maxToolIterations() + ")，已暂停并等待下一轮。 ");
     }
 
+    public void reset() {
+        history.clear();
+        injectedToolSkillPrompts.clear();
+        history.add(LlmClient.Message.system(systemPrompt()));
+        lastInputTokens = 0;
+        lastOutputTokens = 0;
+    }
+
     public int getContextTokens() {
         return lastInputTokens;
     }

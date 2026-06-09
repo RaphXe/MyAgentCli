@@ -184,63 +184,10 @@ final class InlineActivityDisplay implements AutoCloseable {
     }
 
     static String fit(String value, int columns) {
-        if (value == null) {
-            return "";
-        }
-        if (columns <= 0) {
-            return "";
-        }
-        if (displayWidth(value) <= columns) {
-            return value;
-        }
-        if (columns <= 3) {
-            return truncateByDisplayWidth(value, columns);
-        }
-        return truncateByDisplayWidth(value, columns - 3) + "...";
-    }
-
-    private static String truncateByDisplayWidth(String value, int maxColumns) {
-        StringBuilder result = new StringBuilder();
-        int used = 0;
-        for (int i = 0; i < value.length(); ) {
-            int codePoint = value.codePointAt(i);
-            int width = codePointWidth(codePoint);
-            if (used + width > maxColumns) {
-                break;
-            }
-            result.appendCodePoint(codePoint);
-            used += width;
-            i += Character.charCount(codePoint);
-        }
-        return result.toString();
+        return com.raph.render.DisplayWidth.fit(value, columns);
     }
 
     static int displayWidth(String value) {
-        if (value == null || value.isEmpty()) {
-            return 0;
-        }
-        int width = 0;
-        for (int i = 0; i < value.length(); ) {
-            int codePoint = value.codePointAt(i);
-            width += codePointWidth(codePoint);
-            i += Character.charCount(codePoint);
-        }
-        return width;
-    }
-
-    private static int codePointWidth(int codePoint) {
-        if (Character.isISOControl(codePoint)) {
-            return 0;
-        }
-        Character.UnicodeScript script = Character.UnicodeScript.of(codePoint);
-        if (script == Character.UnicodeScript.HAN
-                || script == Character.UnicodeScript.HIRAGANA
-                || script == Character.UnicodeScript.KATAKANA
-                || script == Character.UnicodeScript.HANGUL
-                || (codePoint >= 0x1F300 && codePoint <= 0x1FAFF)
-                || (codePoint >= 0xFF01 && codePoint <= 0xFF60)) {
-            return 2;
-        }
-        return 1;
+        return com.raph.render.DisplayWidth.of(value);
     }
 }

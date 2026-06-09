@@ -44,6 +44,7 @@ public class AgentRuntime {
     private final int maxRounds;
     private final int maxContextTokens;
     private final Renderer renderer;
+    private final ExecutorService sharedExecutor;
     private String finalAnswer;
     private String currentGoal = "";
     private String runtimeStatus = "idle";
@@ -76,6 +77,11 @@ public class AgentRuntime {
         this.maxRounds = maxRounds <= 0 ? DEFAULT_MAX_ROUNDS : maxRounds;
         this.maxContextTokens = ContextWindowConfig.loadMaxContextTokens();
         this.renderer = renderer == null ? new PlainRenderer(System.out) : renderer;
+        this.sharedExecutor = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "team-worker");
+            t.setDaemon(true);
+            return t;
+        });
         registerDefaultTeam();
     }
 
@@ -87,6 +93,10 @@ public class AgentRuntime {
         runtimeStatus = "running";
         currentRound = 0;
         agentSteps = 0;
+        messageBus.reset();
+        for (TeamAgent agent : agents.values()) {
+            agent.reset();
+        }
         String threadId = "team-" + System.currentTimeMillis();
         messageBus.send(AgentMessage.of(threadId, "user", "coordinator", AgentMessage.Type.GOAL, goal));
 
@@ -194,15 +204,14 @@ public class AgentRuntime {
         );
     }
 
+    public void close() {
+        sharedExecutor.shutdownNow();
+    }
+
     private AgentDecision callAgentWithHeartbeat(TeamAgent agent, RuntimeView view,
                                                  List<AgentMessage> inbox, StringBuilder log) throws IOException {
-        ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "team-agent-" + agent.id());
-            t.setDaemon(true);
-            return t;
-        });
         long start = System.currentTimeMillis();
-        Future<AgentDecision> future = executor.submit(() -> agent.step(
+        Future<AgentDecision> future = sharedExecutor.submit(() -> agent.step(
                 view,
                 inbox,
                 LlmClient.StreamListener.NO_OP,
@@ -224,11 +233,11 @@ public class AgentRuntime {
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            future.cancel(true);
             throw new IOException("Agent 调度被中断: " + agent.id(), e);
         } catch (Exception e) {
+            future.cancel(true);
             throw new IOException("Agent 执行失败: " + agent.id() + " - " + e.getMessage(), e);
-        } finally {
-            executor.shutdownNow();
         }
     }
 
@@ -501,13 +510,7 @@ public class AgentRuntime {
 
     private boolean runSubAgents(String threadId, TeamAgent parentAgent,
                                  List<SubAgentRequestSpec> requests, StringBuilder log) {
-        int poolSize = Math.min(MAX_PARALLEL_SUBAGENTS, requests.size());
-        ExecutorService executor = Executors.newFixedThreadPool(poolSize, r -> {
-            Thread t = new Thread(r, "sub-agent-" + parentAgent.id());
-            t.setDaemon(true);
-            return t;
-        });
-        CompletionService<SubAgentRunResult> completionService = new ExecutorCompletionService<>(executor);
+        CompletionService<SubAgentRunResult> completionService = new ExecutorCompletionService<>(sharedExecutor);
         List<Future<SubAgentRunResult>> futures = new ArrayList<>();
 
         logLine(log, "│   ⇢ spawn subagent batch parent=" + parentAgent.id() + " children=" + requests.size());
@@ -569,7 +572,6 @@ public class AgentRuntime {
                     future.cancel(true);
                 }
             }
-            executor.shutdownNow();
         }
 
         int timedOut = futures.size() - completed;
